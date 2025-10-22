@@ -1,0 +1,25 @@
+# ─────────────────────────────
+# Ignore temporary PowerShell backup files (created by some editors)
+*.ps1~
+
+
+# Ignore all log files
+*.log
+
+
+# Ignore VS Code settings and workspace folder
+.vscode/
+
+
+# ─────────────────────────────
+# Ignore everything inside binary_code/
+binary_files/*
+
+
+# But allow this specific file (e.g. to preserve package structure)
+!binary_files/__init__.py
+
+
+# ─────────────────────────────
+# Ignore Python virtual environment
+.venv/

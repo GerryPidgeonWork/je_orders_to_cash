@@ -1,0 +1,6 @@
+The following commands will produce the executable files:
+
+# Scripts used for Importing Files
+
+pyinstaller --onefile --distpath binary_files/just_eat_gui/dist --workpath binary_files/just_eat_gui/build --specpath binary_files/just_eat_gui main/M00_run_gui.py
+
