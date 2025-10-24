@@ -38,6 +38,7 @@ provider_pdf_processed_folder = provider_pdf_folder / '02 Processed'
 
 provider_dwh_folder = provider_root_folder / '03 DWH'
 provider_output_folder = provider_root_folder / '04 Consolidated Output'
+provider_refund_folder = provider_output_folder / '01 Refund Data'
 
 # ====================================================================================================
 # Ensure folders exist

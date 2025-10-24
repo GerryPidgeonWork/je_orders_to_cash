@@ -11,8 +11,8 @@ USE DATABASE dbt_prod;
 
 WITH reporting_period AS (
     SELECT
-        '2025-09-01' AS reporting_start_date_day
-        , '2025-10-05' AS  reporting_end_date_day)
+        '2024-12-01' AS reporting_start_date_day
+        , '2024-12-31' AS  reporting_end_date_day)
 
 -- ===============================
 -- Pull Location Data for base query

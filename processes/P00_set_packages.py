@@ -13,7 +13,7 @@ import getpass                                                  # Securely get c
 import threading                                                # Run code concurrently using threads
 import queue                                                    # Thread-safe FIFO queue for communication between threads
 import tkinter as tk                                            # Standard Python GUI toolkit
-from datetime import date, datetime                             # Date and time handling
+from datetime import date, datetime, timedelta                  # Date and time handling
 from urllib.parse import (                                      # URL utilities (parsing & building URLs safely)
     urljoin,                                                    # Join base + relative URLs
     urlparse,                                                   # Parse URL into components
@@ -26,7 +26,7 @@ from dataclasses import dataclass                               # Create structu
 
 # --- Third-party imports (require installation) ---
 import pandas as pd                                             # (pip install pandas) Data analysis and CSV/file handling
-import numpy as np
+import numpy as np                                              # (Installed with pandas) Numerical operations and arrays
 import pdfplumber                                               # (pip install pdfplumber) Extract text/tables from PDF files accurately
-from pdfminer.high_level import extract_text                    # (pip install pdfminer.six) Fallback PDF text extraction if pdfplumber fails
+from pdfminer.high_level import extract_text                    # (Installed with pdfplumber) Fallback PDF text extraction if pdfplumber fails
 from tkcalendar import DateEntry                                # (pip install tkcalendar) Calendar drop down for GUI element

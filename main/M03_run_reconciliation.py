@@ -38,6 +38,7 @@ from processes.P00_set_packages import *
 # ====================================================================================================
 from processes.P00_set_packages import *
 from processes.P01_set_file_paths import provider_output_folder
+from processes.P03_shared_functions import statement_overlaps_file
 from processes.P04_static_lists import DWH_COLUMN_RENAME_MAP, JET_COLUMN_RENAME_MAP
 
 # ====================================================================================================
@@ -46,40 +47,66 @@ from processes.P04_static_lists import DWH_COLUMN_RENAME_MAP, JET_COLUMN_RENAME_
 
 def find_matching_statement_file(output_folder: Path, start_date: str, end_date: str) -> Path:
     """
-    Find the JE Statement file overlapping the selected GUI date range.
+    Find the JE Statement file that best matches the selected GUI date range.
 
-    The filename pattern follows:
-        "YY.MM.DD - YY.MM.DD - JE Order Level Detail.csv"
-
-    Returns:
-        Path to the matching file if overlap exists, else raises FileNotFoundError.
+    Logic priority:
+    1️⃣ Prefer a file that fully covers the GUI range (start ≤ GUI start AND end ≥ GUI end)
+    2️⃣ Otherwise, choose the file with the largest overlap period
     """
     gui_start = datetime.strptime(start_date, "%Y-%m-%d").date()
     gui_end = datetime.strptime(end_date, "%Y-%m-%d").date()
 
-    # Pattern to extract date ranges from filenames
     pattern = re.compile(
         r"(\d{2})\.(\d{2})\.(\d{2}) - (\d{2})\.(\d{2})\.(\d{2}) - JE Order Level Detail\.csv$",
         re.I,
     )
 
+    matching_files = []
+
     for file in output_folder.glob("*JE Order Level Detail.csv"):
         m = pattern.search(file.name)
         if not m:
             continue
+
         start = datetime.strptime(f"20{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d").date()
         end = datetime.strptime(f"20{m.group(4)}-{m.group(5)}-{m.group(6)}", "%Y-%m-%d").date()
 
-        # Include file if its range overlaps with GUI range
-        if not (end < gui_start or start > gui_end):
-            print(f"✅ Found matching JE Statement: {file.name}")
-            return file
+        # Skip invalid ranges
+        if start > end:
+            continue
 
-    # Raise friendly error if no overlapping file found
-    raise FileNotFoundError(
-        f"No JE Statement file found in '{output_folder}' overlapping {gui_start} → {gui_end}.\n"
-        f"Please run Step 2 (Process PDFs) first."
-    )
+        # Calculate overlap days
+        if end < gui_start or start > gui_end:
+            continue
+        overlap_start = max(gui_start, start)
+        overlap_end = min(gui_end, end)
+        overlap_days = (overlap_end - overlap_start).days + 1
+
+        # Track file info
+        matching_files.append((file, start, end, overlap_days))
+
+    if not matching_files:
+        raise FileNotFoundError(
+            f"No JE Statement file found in '{output_folder}' overlapping {gui_start} → {gui_end}.\n"
+            f"Please run Step 2 (Process PDFs) first or choose a matching range."
+        )
+
+    # ✅ 1️⃣ Try to find a file that fully contains the GUI range
+    full_cover = [
+        (f, s, e, d)
+        for f, s, e, d in matching_files
+        if s <= gui_start and e >= gui_end
+    ]
+    if full_cover:
+        chosen_file = full_cover[0][0]
+        print(f"✅ Found fully covering JE Statement: {chosen_file.name}")
+        return chosen_file
+
+    # ✅ 2️⃣ Otherwise pick the one with largest overlap
+    matching_files.sort(key=lambda x: x[3], reverse=True)
+    chosen_file = matching_files[0][0]
+    print(f"✅ Found overlapping JE Statement: {chosen_file.name}")
+    return chosen_file
 
 # ====================================================================================================
 # Utility – Clean JE Order ID
@@ -177,19 +204,23 @@ def run_reconciliation(output_folder: Path, start_date: str, end_date: str):
         )
 
         # ------------------------------------------------------------------------------------------------
-        # Step 3b — Remove any DWH data paired to non-order rows
+        # Step 3b — 🔒 LOCKED: Remove any DWH data paired to non-order JE rows
         # ------------------------------------------------------------------------------------------------
-        # Commission and Marketing lines should never carry DWH fields.
-        dwh_cols = [col for col in merged.columns if col.endswith("_dwh") or col in dwh_df.columns]
-        merged.loc[nonorder_mask, dwh_cols] = np.nan
+        # Purpose:
+        # Commission and Marketing lines in JE statements are summary-level rows.
+        # They must NOT be joined to any DWH data (no order_id, gp_date, etc.).
+        # This ensures they never appear as "Matched" or distort totals.
+        #
+        # 🔒 IMPORTANT — DO NOT REMOVE OR MODIFY THIS BLOCK.
+        # It guarantees financial isolation between JE non-order rows and DWH order data.
+        # ------------------------------------------------------------------------------------------------
+        dwh_cols = [
+            col for col in merged.columns
+            if col.endswith("_dwh") or col in dwh_df.columns
+        ]
 
-
-        # Display example unmatched orders for diagnostics
-        sample_unmatched = merged[(~nonorder_mask) & (~has_dwh_match)]
-        if not sample_unmatched.empty:
-            sample_ids = sample_unmatched["je_order_id"].dropna().unique()[:10]
-            if len(sample_ids) > 0:
-                print(f"⚠ Example unmatched JE order_ids: {', '.join(sample_ids)}")
+        # Zero-out / clear all DWH fields for Commission & Marketing rows
+        merged.loc[merged["transaction_type"].isin(["Commission", "Marketing"]), dwh_cols] = np.nan
 
         # ------------------------------------------------------------------------------------------------
         # Step 4 — Identify DWH Orders Missing from JE

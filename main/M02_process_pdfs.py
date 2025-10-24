@@ -39,7 +39,8 @@ from processes.P00_set_packages import *
 # ====================================================================================================
 
 from processes.P00_set_packages import *
-from processes.P01_set_file_paths import provider_pdf_folder, provider_pdf_unprocessed_folder, provider_output_folder
+from processes.P01_set_file_paths import provider_pdf_folder, provider_pdf_unprocessed_folder, provider_output_folder, provider_refund_folder
+from processes.P03_shared_functions import statement_overlaps_file
 from processes.P04_static_lists import JET_COLUMN_RENAME_MAP
 
 # ====================================================================================================
@@ -47,6 +48,7 @@ from processes.P04_static_lists import JET_COLUMN_RENAME_MAP
 # ====================================================================================================
 PDF_FOLDER = provider_pdf_unprocessed_folder
 OUTPUT_FOLDER = provider_output_folder
+REFUND_FOLDER = provider_refund_folder
 
 # ====================================================================================================
 # Helper Functions – Extract and Clean PDF Text
@@ -112,19 +114,31 @@ def extract_amounts(segment_text: str):
 
 
 def parse_reason_and_order(desc: str):
-    """Extract refund reason and order number (supports multiple known patterns)."""
+    """
+    Extract refund reason and order number from a description line.
+    Handles:
+      - "Customer compensation for X query 123456"
+      - "Restaurant Comp – Cancelled Order – 123456"
+      - "Order ID: 123456 - Partner Compensation Recook (Outside the scope of VAT)"
+    """
     reason, order = "", ""
+
+    # 1️⃣ Customer compensation format
     m1 = re.search(r"Customer compensation for (.*?) query (\d+)", desc, re.IGNORECASE)
     if m1:
         return m1.group(1).strip(), m1.group(2).strip()
-    m2 = re.search(
-        r"Restaurant\s+Comp\s*[-–]?\s*Cancelled\s+Order\s*[-–\s]*?(\d+)",
-        desc, re.IGNORECASE
-    )
+
+    # 2️⃣ Restaurant Comp – Cancelled Order format
+    m2 = re.search(r"Restaurant\s+Comp\s*[-–]?\s*Cancelled\s+Order\s*[-–\s]*?(\d+)", desc, re.IGNORECASE)
     if m2:
         return "Restaurant Comp - Cancelled Order", m2.group(1).strip()
-    return reason, order
 
+    # 3️⃣ NEW: Partner Compensation Recook format
+    m3 = re.search(r"Order\s*ID[:\s]*([0-9]+)\s*[-–]\s*Partner\s+Compensation\s+Recook", desc, re.IGNORECASE)
+    if m3:
+        return "Partner Compensation Recook", m3.group(1).strip()
+
+    return reason, order
 
 def build_dataframe(descriptions, amounts):
     """Combine descriptions and amounts into a structured DataFrame."""
@@ -184,8 +198,7 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
         start = datetime.strptime(f"20{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d").date()
         end = start + timedelta(days=6)  # Each statement covers 1 week (Mon–Sun)
 
-        overlaps = not (end < gui_start or start > gui_end)
-        if overlaps:
+        if statement_overlaps_file(str(start), str(end), str(gui_start), str(gui_end)):
             valid_files.append(pdf_path)
         else:
             print(f"⏭ Skipped {pdf_path.name} (covers {start} → {end}, outside {gui_start} → {gui_end})")
@@ -318,7 +331,7 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
 
         # Save per-statement refund detail file
         if not df_full.empty:
-            refund_csv_path = OUTPUT_FOLDER / f"{pdf_path.stem}_RefundDetails.csv"
+            refund_csv_path = REFUND_FOLDER / f"{pdf_path.stem}_RefundDetails.csv"
             (
                 df_full
                 .assign(
