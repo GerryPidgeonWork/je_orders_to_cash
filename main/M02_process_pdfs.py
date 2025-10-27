@@ -55,28 +55,79 @@ REFUND_FOLDER = provider_refund_folder
 # ====================================================================================================
 
 def get_segment_text(pdf_path: Path) -> str:
-    """Extract section text between 'Commission to Just Eat' and 'Subtotal'."""
+    """
+    Extract the section text between the markers 'Commission to Just Eat' and 'Subtotal' within a PDF file.
+
+    Args:
+        pdf_path (Path): Full file path to the Just Eat PDF statement.
+
+    Returns:
+        str: Text segment found between 'Commission to Just Eat' and 'Subtotal'.
+             Returns an empty string if either marker is missing.
+
+    Notes:
+        - Uses pdfminer.six's `extract_text()` to read full text content.
+        - Ensures robustness by checking marker presence before slicing.
+        - Helps isolate commission-related data for further parsing or reconciliation.
+    """
+
+    # Extract full text content from the given PDF file
     txt = extract_text(str(pdf_path))
+
+    # Find the starting index of the "Commission to Just Eat" section
     start = txt.find("Commission to Just Eat")
+
+    # Find the ending index marked by "Subtotal", starting the search after 'start'
     end = txt.find("Subtotal", start)
+
+    # If either marker is not found, return an empty string safely
     if start == -1 or end == -1:
         return ""
+
+    # Return only the text between the start and end markers
     return txt[start:end]
 
-
 def extract_descriptions(segment_text: str):
-    """Clean and merge multi-line entries inside the Commission/Refund section."""
+    """
+    Clean and consolidate multi-line description entries within the Commission/Refund section of a Just Eat statement.
+
+    Args:
+        segment_text (str): Raw text segment extracted from the PDF between
+                            'Commission to Just Eat' and 'Subtotal'.
+
+    Returns:
+        list[str]: A cleaned list of text lines, where multi-line descriptions
+                   are merged into single coherent entries.
+
+    Notes:
+        - Removes empty lines and excessive whitespace.
+        - Strips standalone monetary values (£xx.xx) that appear on their own lines.
+        - Merges continuation lines that start with lowercase letters,
+          typical when text wraps across multiple lines in the PDF.
+        - Provides consistent, cleaned data for downstream regex parsing
+          or structured extraction of individual commission/refund items.
+    """
+
+    # Guard clause — if the input text is empty, return an empty list
     if not segment_text:
         return []
-    # Flatten whitespace and remove empty lines
+
+    # Normalize text:
+    # - Replace multiple whitespace characters (spaces, tabs, etc.) with single spaces
+    # - Strip leading/trailing spaces
+    # - Remove empty lines created by PDF formatting
     lines = [re.sub(r'\s+', ' ', ln).strip() for ln in segment_text.splitlines()]
     lines = [ln for ln in lines if ln]
 
-    # Remove any standalone £ amount lines
+    # Identify monetary patterns like "£123.45" or "– £1,234.56"
+    # and remove any lines containing only those amounts.
     money_re = re.compile(r'[–\-]?\s*£\s*[0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2}')
     lines = [money_re.sub('', ln).strip() for ln in lines if not money_re.fullmatch(ln)]
 
-    # Merge wrapped lines where continuation begins lowercase
+    # Merge continuation lines:
+    # - If a line starts with an uppercase letter, it’s a new description.
+    # - If it starts lowercase, it’s a continuation of the previous line.
+    # This accounts for wrapped lines caused by narrow PDF layouts.
     merged = []
     for ln in lines:
         if not merged:
@@ -87,74 +138,170 @@ def extract_descriptions(segment_text: str):
         else:
             merged[-1] += " " + ln
 
-    # Remove excess spacing and return list
+    # Final cleanup — collapse any remaining double spaces and trim entries
     merged = [re.sub(r'\s{2,}', ' ', s).strip() for s in merged]
+
+    # Return only non-empty, fully cleaned description strings
     return [s for s in merged if s]
 
-
 def extract_amounts(segment_text: str):
-    """Extract all £ amounts (handles negatives, line breaks, and dash formats)."""
+    """
+    Extract all monetary amounts (£) from the provided text segment, correctly
+    handling negatives, en-dashes, and line-break formatting irregularities.
+
+    Args:
+        segment_text (str): Raw text segment extracted from the Commission/Refund
+                            section of the Just Eat PDF statement.
+
+    Returns:
+        list[float]: A list of numeric values (positive or negative) representing
+                     all detected £ amounts within the text.
+
+    Notes:
+        - Handles en-dash characters (–) commonly used in PDFs instead of hyphens.
+        - Corrects for broken line breaks (e.g., '- \n£12.34' → '-£12.34').
+        - Recognizes thousands separators (commas) and converts to float.
+        - Returns signed numeric values suitable for arithmetic reconciliation.
+    """
+
+    # Guard clause — return an empty list if there’s no text to parse
     if not segment_text:
         return []
 
-    # Normalise en-dashes and line breaks for cleaner regex matches
+    # Normalise text for reliable regex matching:
+    # - Replace en-dashes (–) with regular hyphens (-)
+    # - Fix split patterns where a dash and pound sign are separated by a newline
     segment_text = (
         segment_text
-        .replace('–', '-')       # en dash → hyphen
-        .replace('- \n£', '-£')  # fix when dash and £ are separated
-        .replace('-\n£', '-£')
+        .replace('–', '-')       # en dash → standard hyphen
+        .replace('- \n£', '-£')  # handle split line between dash and pound sign
+        .replace('-\n£', '-£')   # handle tighter variant
     )
 
+    # List to collect all parsed monetary values
     results = []
-    for m in re.finditer(r'([\-]?)\s*£\s*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})', segment_text):
-        sign = -1 if m.group(1) == '-' else 1
-        val = float(m.group(2).replace(",", "")) * sign
-        results.append(val)
-    return results
 
+    # Regex pattern explanation:
+    # ([\-]?)          → optional minus sign (hyphen)
+    # \s*£\s*          → pound sign with optional spaces
+    # ([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})
+    #                  → number with optional thousands separators and two decimals
+    for m in re.finditer(r'([\-]?)\s*£\s*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})', segment_text):
+        # Determine sign based on presence of '-' before the £
+        sign = -1 if m.group(1) == '-' else 1
+
+        # Convert numeric portion to float, removing commas
+        val = float(m.group(2).replace(",", "")) * sign
+
+        # Append the signed value to the results list
+        results.append(val)
+
+    # Return the list of extracted amounts
+    return results
 
 def parse_reason_and_order(desc: str):
     """
-    Extract refund reason and order number from a description line.
-    Handles:
-      - "Customer compensation for X query 123456"
-      - "Restaurant Comp – Cancelled Order – 123456"
-      - "Order ID: 123456 - Partner Compensation Recook (Outside the scope of VAT)"
+    Parse a single description line to extract the refund reason and corresponding order number.
+
+    Args:
+        desc (str): Description text extracted from the Just Eat Commission/Refund section.
+                    Each line typically describes a compensation, refund, or cancellation reason.
+
+    Returns:
+        tuple[str, str]: A tuple containing:
+            - reason (str): Parsed refund or compensation reason.
+            - order (str): Extracted Just Eat order number (if available).
+
+    Notes:
+        - Supports multiple known statement formats, including:
+            1️⃣ "Customer compensation for X query 123456"
+            2️⃣ "Restaurant Comp – Cancelled Order – 123456"
+            3️⃣ "Order ID: 123456 - Partner Compensation Recook (Outside the scope of VAT)"
+        - Returns empty strings if no pattern matches.
+        - Designed to be easily extended as new refund formats are introduced by Just Eat.
     """
+
+    # Initialize default values
     reason, order = "", ""
 
-    # 1️⃣ Customer compensation format
+    # 1️⃣ Customer Compensation format
+    # Example: "Customer compensation for Missing Item query 123456"
+    # Captures:
+    #   - Reason: text between 'for' and 'query'
+    #   - Order: numeric string after 'query'
     m1 = re.search(r"Customer compensation for (.*?) query (\d+)", desc, re.IGNORECASE)
     if m1:
         return m1.group(1).strip(), m1.group(2).strip()
 
-    # 2️⃣ Restaurant Comp – Cancelled Order format
+    # 2️⃣ Restaurant Compensation – Cancelled Order format
+    # Example: "Restaurant Comp – Cancelled Order – 123456"
+    # Captures:
+    #   - Reason: fixed string "Restaurant Comp - Cancelled Order"
+    #   - Order: numeric ID after the final dash
     m2 = re.search(r"Restaurant\s+Comp\s*[-–]?\s*Cancelled\s+Order\s*[-–\s]*?(\d+)", desc, re.IGNORECASE)
     if m2:
         return "Restaurant Comp - Cancelled Order", m2.group(1).strip()
 
-    # 3️⃣ NEW: Partner Compensation Recook format
+    # 3️⃣ Partner Compensation Recook format
+    # Example: "Order ID: 123456 - Partner Compensation Recook (Outside the scope of VAT)"
+    # Captures:
+    #   - Reason: fixed string "Partner Compensation Recook"
+    #   - Order: numeric ID after "Order ID:"
     m3 = re.search(r"Order\s*ID[:\s]*([0-9]+)\s*[-–]\s*Partner\s+Compensation\s+Recook", desc, re.IGNORECASE)
     if m3:
         return "Partner Compensation Recook", m3.group(1).strip()
 
+    # If no pattern matched, return empty defaults
+    # This allows safe unpacking by caller functions (e.g., reason, order = parse_reason_and_order(x))
     return reason, order
 
 def build_dataframe(descriptions, amounts):
-    """Combine descriptions and amounts into a structured DataFrame."""
+    """
+    Combine parsed description and amount lists into a structured pandas DataFrame.
+
+    Args:
+        descriptions (list[str]): Cleaned list of text descriptions extracted
+                                  from the Commission/Refund section of the PDF.
+        amounts (list[float]): Corresponding list of £ amounts extracted from the same section.
+
+    Returns:
+        pandas.DataFrame: A DataFrame containing one row per parsed entry with the following columns:
+            - description (str): Original cleaned description text.
+            - amount (float): Monetary amount (£), positive or negative.
+            - reason (str): Parsed refund/compensation reason (from `parse_reason_and_order`).
+            - order_number (str): Extracted order ID associated with the entry, if present.
+            - outside_scope (bool): True if the description includes "Outside the scope of VAT".
+
+    Notes:
+        - Only pairs up to the shorter of the two lists are included (safe handling of mismatched counts).
+        - Uses helper function `parse_reason_and_order()` for semantic enrichment.
+        - Produces a structured dataset for reconciliation and downstream financial analysis.
+    """
+
+    # Limit to the smaller of the two lists to prevent index errors
     n = min(len(descriptions), len(amounts))
+
+    # Initialize an empty list to accumulate structured row dictionaries
     data = []
+
+    # Iterate through paired description/amount entries
     for i in range(n):
         desc = descriptions[i]
         amt = amounts[i]
+
+        # Extract detailed reason and order number from the description
         reason, order = parse_reason_and_order(desc)
+
+        # Build a structured record dictionary for each entry
         data.append({
-            "description": desc,
-            "amount": amt,
-            "reason": reason,
-            "order_number": order,
-            "outside_scope": "Outside the scope of VAT" in desc
+            "description": desc,                       # Original text entry
+            "amount": amt,                             # Monetary value
+            "reason": reason,                          # Parsed refund reason
+            "order_number": order,                     # Associated Just Eat order ID
+            "outside_scope": "Outside the scope of VAT" in desc  # VAT exclusion flag
         })
+
+    # Convert accumulated records into a DataFrame
     return pd.DataFrame(data)
 
 # ====================================================================================================
@@ -163,68 +310,117 @@ def build_dataframe(descriptions, amounts):
 
 def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None, end_date: str = None):
     """
-    Parse all JE PDF statements; if start_date/end_date (YYYY-MM-DD) are provided,
-    only PDFs whose statement period overlaps that range will be processed.
+    Parse all Just Eat (JE) weekly PDF statements and produce a consolidated CSV output.
+
+    Args:
+        pdf_folder (Path): Folder containing weekly JE PDF statements.
+        output_folder (Path): Destination folder for the consolidated CSV output.
+        start_date (str, optional): Inclusive start date (YYYY-MM-DD) for filtering statements.
+        end_date (str, optional): Inclusive end date (YYYY-MM-DD) for filtering statements.
+
+    Returns:
+        str or Path: Returns a message string if no PDFs were processed,
+                     otherwise returns the path to the consolidated CSV file.
+
+    Purpose:
+        This master function acts as the orchestrator for Step 2 of the Orders-to-Cash workflow.
+        It automates the end-to-end parsing of all Just Eat PDF statements within a selected
+        date range and converts them into a structured, analysis-ready CSV.
+
+    High-level flow:
+        1️⃣ Find all matching PDFs inside the JE Statements folder.
+        2️⃣ Filter to only those overlapping the GUI-selected start/end date range.
+        3️⃣ Extract orders, refunds, commission and marketing data from each PDF.
+        4️⃣ Validate extracted figures against header totals printed on the PDF.
+        5️⃣ Merge everything into a single consolidated “JE Order Level Detail.csv”.
     """
+
+    # --- STEP 0: Print a banner for readability in the console ---
     print("\n=================== JustEat PARSER ===================")
 
-    # Convert GUI string inputs to date objects
+    # ---------------------------------------------------------------------------------------------
+    # STEP 1: Convert GUI date-picker strings (YYYY-MM-DD) to Python date objects
+    # ---------------------------------------------------------------------------------------------
+    # These will be used to compare against each statement’s internal period to decide
+    # which PDFs should be processed.
     gui_start = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
-    gui_end = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date else None
+    gui_end   = datetime.strptime(end_date, "%Y-%m-%d").date()   if end_date   else None
     print(f"🧭 Running JE Parser for range: {start_date} → {end_date}")
 
-    # Find all JE PDFs in folder
+    # ---------------------------------------------------------------------------------------------
+    # STEP 2: Locate all files that look like JE Statements
+    # ---------------------------------------------------------------------------------------------
+    # The naming convention is consistent (“YY.MM.DD – JE Statement.pdf”)
+    # so a simple wildcard search is reliable.
     pdf_files = sorted(pdf_folder.glob("*JE Statement*.pdf"))
     if not pdf_files:
+        # If the folder is empty or mis-selected, fail early to alert the user.
         raise FileNotFoundError(f"No matching PDFs found in: {pdf_folder}")
 
     print(f"📂 Found {len(pdf_files)} PDF(s) to process.")
     if gui_start and gui_end:
         print(f"📅 Restricting to PDFs overlapping {gui_start} → {gui_end}")
 
-    # ------------------------------------------------------------------------------------------------
-    # ⚡ Fast Filename Filter – identify PDFs overlapping the GUI range
-    # ------------------------------------------------------------------------------------------------
-    from datetime import timedelta
+    # ---------------------------------------------------------------------------------------------
+    # STEP 3: Filename-based date filter (fast pre-check before heavy PDF parsing)
+    # ---------------------------------------------------------------------------------------------
+    # Many JE Statements follow the “YY.MM.DD” pattern in the filename.
+    # We can extract that quickly to determine the statement’s starting Monday.
+    # This avoids unnecessary I/O when the GUI date range is narrow.
     filename_pattern = re.compile(r"(\d{2})\.(\d{2})\.(\d{2})", re.I)
-    valid_files = []
+    valid_files = []   # Will collect only those files whose period overlaps the selected range
 
     for pdf_path in pdf_files:
+        # Try to extract “YY.MM.DD” from the filename.
         m = filename_pattern.search(pdf_path.name)
         if not m:
+            # If no date pattern exists, we can’t infer the week start → skip but log the reason.
             print(f"⚠ Could not parse start date from filename: {pdf_path.name}")
             continue
 
+        # Rebuild a full date object: prepend “20” to the 2-digit year.
         start = datetime.strptime(f"20{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d").date()
-        end = start + timedelta(days=6)  # Each statement covers 1 week (Mon–Sun)
+        end   = start + timedelta(days=6)   # Each statement always covers 7 days (Mon–Sun).
 
+        # Use helper statement_overlaps_file() to decide if this weekly period intersects
+        # the GUI-selected date window.
         if statement_overlaps_file(str(start), str(end), str(gui_start), str(gui_end)):
             valid_files.append(pdf_path)
         else:
+            # If outside the selected window, explain exactly which week was skipped.
             print(f"⏭ Skipped {pdf_path.name} (covers {start} → {end}, outside {gui_start} → {gui_end})")
 
+    # Replace the full list with the filtered subset.
     pdf_files = valid_files
     print(f"📄 {len(pdf_files)} PDF(s) remain after filename filter.")
 
+        # =================================================================================================
+    # STEP 4: Loop through each valid PDF and extract all required details
     # =================================================================================================
-    # PDF Parsing Loop
-    # =================================================================================================
-    all_rows = []
+    all_rows = []   # Collects one combined DataFrame per PDF before merging
 
     for pdf_path in pdf_files:
         print(f"\n📄 Processing: {pdf_path.name}")
 
-        # Extract text from all pages using pdfplumber
+        # ---------------------------------------------------------------------------------------------
+        # STEP 4.1 – Read and flatten all text content from the PDF
+        # ---------------------------------------------------------------------------------------------
+        # pdfplumber allows page-by-page text extraction; we join everything into one long string
+        # because some patterns (e.g. “Total sales ... You will receive ...”) may span pages.
         with pdfplumber.open(pdf_path) as pdf:
             full_text_pages = [p.extract_text() or "" for p in pdf.pages]
         full_text = "\n".join(full_text_pages)
 
-        # Detect statement period (multiple date formats supported)
+        # ---------------------------------------------------------------------------------------------
+        # STEP 4.2 – Detect the statement period (start and end dates) printed in the header
+        # ---------------------------------------------------------------------------------------------
+        # JE uses two possible formats (textual or numeric), so we try both.
         period_patterns = [
             re.compile(r"(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})\s*[-–to]+\s*(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})", re.I),
             re.compile(r"(\d{1,2}/\d{1,2}/\d{2,4})\s*[-–to]+\s*(\d{1,2}/\d{1,2}/\d{2,4})", re.I),
         ]
         m_period = None
+        # Search each page until we find a date range line.
         for page_text in full_text_pages:
             for pat in period_patterns:
                 m_period = pat.search(page_text)
@@ -233,11 +429,13 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
             if m_period:
                 break
 
+        # Capture the raw text matches (if found)
         statement_start_raw = m_period.group(1) if m_period else None
-        statement_end_raw = m_period.group(2) if m_period else None
+        statement_end_raw   = m_period.group(2) if m_period else None
 
-        # Safely parse statement dates using multiple formats
+        # --- Inner helper to parse arbitrary date formats safely ---
         def parse_date_safe(date_str):
+            """Return a date object from mixed formats or None if parsing fails."""
             if not date_str:
                 return None
             for fmt in ("%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%d/%m/%y"):
@@ -248,32 +446,41 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
             return None
 
         statement_start = parse_date_safe(statement_start_raw)
-        statement_end = parse_date_safe(statement_end_raw)
+        statement_end   = parse_date_safe(statement_end_raw)
         if not statement_start or not statement_end:
+            # If we can’t read the date range, the file can’t be tied to a week → skip gracefully.
             print("   ⚠ Could not extract statement period → skipping file.")
             continue
 
-        # Extract header-level values for validation
-        orders_count_pat = re.compile(r"Number\s+of\s+orders\s+([\d,]+)", re.I)
-        total_sales_pat = re.compile(r"Total\s+sales.*?£\s*([\d,]+\.\d{2})", re.I | re.S)
-        you_receive_pat = re.compile(r"You\s+will\s+receive.*?£\s*([\d,]+\.\d{2})", re.I | re.S)
-        payment_date_pat = re.compile(r"paid\s+on\s+(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})", re.I)
+        # ---------------------------------------------------------------------------------------------
+        # STEP 4.3 – Extract header-level summary metrics for validation
+        # ---------------------------------------------------------------------------------------------
+        # These fields let us cross-check our parsed totals later for data integrity.
+        orders_count_pat  = re.compile(r"Number\s+of\s+orders\s+([\d,]+)", re.I)
+        total_sales_pat   = re.compile(r"Total\s+sales.*?£\s*([\d,]+\.\d{2})", re.I | re.S)
+        you_receive_pat   = re.compile(r"You\s+will\s+receive.*?£\s*([\d,]+\.\d{2})", re.I | re.S)
+        payment_date_pat  = re.compile(r"paid\s+on\s+(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})", re.I)
 
-        m_orders = orders_count_pat.search(full_text)
-        reported_order_count = int(m_orders.group(1).replace(",", "")) if m_orders else None
-        m_sales = total_sales_pat.search(full_text)
-        reported_total_sales = float(m_sales.group(1).replace(",", "")) if m_sales else None
-        m_recv = you_receive_pat.search(full_text)
-        reported_you_receive = float(m_recv.group(1).replace(",", "")) if m_recv else None
+        # Run regex extractions
+        m_orders  = orders_count_pat.search(full_text)
+        m_sales   = total_sales_pat.search(full_text)
+        m_recv    = you_receive_pat.search(full_text)
         m_payment = payment_date_pat.search(full_text)
-        payment_date_raw = m_payment.group(1) if m_payment else None
 
+        reported_order_count = int(m_orders.group(1).replace(",", "")) if m_orders else None
+        reported_total_sales  = float(m_sales.group(1).replace(",", "")) if m_sales else None
+        reported_you_receive  = float(m_recv.group(1).replace(",", "")) if m_recv else None
+        payment_date_raw      = m_payment.group(1) if m_payment else None
+
+        # Parse payment date (tolerant of missing / malformed values)
         try:
             payment_date = datetime.strptime(payment_date_raw, "%d %b %Y").date() if payment_date_raw else None
         except Exception:
             payment_date = None
 
-        # Skip non-overlapping statements (extra safety)
+        # ---------------------------------------------------------------------------------------------
+        # STEP 4.4 – Extra guard: skip statements that fall entirely outside selected GUI range
+        # ---------------------------------------------------------------------------------------------
         if gui_start and gui_end:
             overlaps = not (statement_end < gui_start or statement_start > gui_end)
             if not overlaps:
@@ -281,18 +488,23 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
                 continue
 
         # =================================================================================================
-        # Extract Orders
+        # STEP 5: Extract individual ORDER lines
         # =================================================================================================
-        line_prefix = re.compile(r"^\s*\d+\s+(\d{2}/\d{2}/\d{2})\s+(\d+)\s+([A-Za-z/&\-]+)\s+(.*)$", re.M)
+        # Each order line begins with a running index, then a date, order ID, type and £ value.
+        line_prefix  = re.compile(r"^\s*\d+\s+(\d{2}/\d{2}/\d{2})\s+(\d+)\s+([A-Za-z/&\-]+)\s+(.*)$", re.M)
         money_finder = re.compile(r"[£]\s*([\d.,]+)")
-        orders_data = []
+        orders_data  = []   # Temporary storage before converting to DataFrame
 
         for m in line_prefix.finditer(full_text):
+            # Split components of each order line
             date, order_id, order_type, tail = m.groups()
+            # Extract all £-amounts that appear on that line
             amts = money_finder.findall(tail)
             if not amts:
-                continue
-            total = float(amts[-1].replace(",", ""))
+                continue  # Skip if no money value found
+            total = float(amts[-1].replace(",", ""))  # Usually the last number is the gross total
+
+            # Record a structured dictionary for this order
             orders_data.append({
                 "order_id": order_id,
                 "date": date,
@@ -306,30 +518,35 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
                 "payment_date": payment_date,
             })
 
-        orders_df = pd.DataFrame(orders_data)
+        # Convert list of dicts → DataFrame for easier aggregation
+        orders_df          = pd.DataFrame(orders_data)
         parsed_order_count = len(orders_df)
         parsed_total_sales = round(orders_df["total_incl_vat"].sum(), 2)
 
         # =================================================================================================
-        # Extract Refund, Commission, and Marketing Details
+        # STEP 6: Extract Refund, Commission and Marketing details
         # =================================================================================================
-        seg = get_segment_text(pdf_path)
-        descriptions = extract_descriptions(seg)
-        amounts = extract_amounts(seg)
-        df_full = build_dataframe(descriptions, amounts)
+        # This section of the PDF (below “Commission to Just Eat ... Subtotal”) is handled by helper
+        # functions that isolate, clean and structure the text before combining.
+        seg          = get_segment_text(pdf_path)          # Raw text segment isolation
+        descriptions = extract_descriptions(seg)           # Clean multi-line refund descriptions
+        amounts      = extract_amounts(seg)                # Match all £ values
+        df_full      = build_dataframe(descriptions, amounts)  # Combine into tabular structure
 
-        # Separate totals by description type
+        # --- Derive grouped totals by content type ---
         commission_sum = df_full[df_full["description"].str.contains("Commission", case=False, na=False)]["amount"].sum()
-        marketing_sum = df_full[
+        marketing_sum  = df_full[
             (~df_full["description"].str.contains("Commission", case=False, na=False)) &
             (df_full["reason"].eq(""))
         ]["amount"].sum()
 
-        # Apply VAT uplift (20%) and reverse sign to match JE payout logic
+        # Apply 20 % VAT uplift and flip sign so commission/marketing show as deductions
         commission_incl_vat = round(commission_sum * 1.20 * -1, 2)
-        marketing_incl_vat = round(marketing_sum * 1.20 * -1, 2)
+        marketing_incl_vat  = round(marketing_sum  * 1.20 * -1, 2)
 
-        # Save per-statement refund detail file
+        # ---------------------------------------------------------------------------------------------
+        # STEP 6.1 – Save per-statement refund-detail file (for audit / debugging)
+        # ---------------------------------------------------------------------------------------------
         if not df_full.empty:
             refund_csv_path = REFUND_FOLDER / f"{pdf_path.stem}_RefundDetails.csv"
             (
@@ -345,8 +562,9 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
             print(f"   💾 Saved refund detail file → {refund_csv_path}")
 
         # =================================================================================================
-        # Refund Aggregation
+        # STEP 7: Aggregate refunds by order (for later joining to order lines)
         # =================================================================================================
+        # Only rows marked “outside_scope” with a valid order number are treated as true refunds.
         if not df_full.empty:
             df_refunds_by_order = (
                 df_full[df_full["outside_scope"] & df_full["order_number"].ne("")]
@@ -358,14 +576,21 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
             df_refunds_by_order = pd.DataFrame(columns=["order_id", "amount"])
 
         # =================================================================================================
-        # Combine Orders + Refunds + Commission + Marketing
+        # STEP 8: Combine Orders + Refunds + Commission + Marketing for this statement
         # =================================================================================================
-        order_rows = orders_df.copy()
-        combined_rows = [order_rows]
+        # Build a unified DataFrame for the current PDF by concatenating multiple components.
+        # Each “type” (Order / Refund / Commission / Marketing) represents one row category.
+        order_rows    = orders_df.copy()
+        combined_rows = [order_rows]  # Start list of DataFrames to concatenate later
 
+        # ---------------------------------------------------------------------------------------------
+        # STEP 8.1 – Add Refund rows if they exist
+        # ---------------------------------------------------------------------------------------------
         if not df_refunds_by_order.empty:
             refund_rows = df_refunds_by_order.copy()
-            refund_rows["refund_amount"] = refund_rows["amount"].apply(lambda x: -x)  # invert once
+
+            # Refunds are stored as positive in the statement but must be negative for netting logic.
+            refund_rows["refund_amount"] = refund_rows["amount"].apply(lambda x: -x)
             refund_rows["total_incl_vat"] = 0.0
             refund_rows["type"] = "Refund"
             refund_rows["date"] = statement_start
@@ -377,7 +602,10 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
             refund_rows.drop(columns=["amount"], inplace=True)
             combined_rows.append(refund_rows)
 
-        # Add commission and marketing summary lines
+        # ---------------------------------------------------------------------------------------------
+        # STEP 8.2 – Add Commission summary row
+        # ---------------------------------------------------------------------------------------------
+        # A single aggregated line ensures the weekly deduction is captured in the dataset.
         if commission_sum != 0:
             combined_rows.append(pd.DataFrame([{
                 "order_id": "",
@@ -392,6 +620,10 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
                 "payment_date": payment_date
             }]))
 
+        # ---------------------------------------------------------------------------------------------
+        # STEP 8.3 – Add Marketing summary row
+        # ---------------------------------------------------------------------------------------------
+        # A single aggregated line ensures the weekly deduction is captured in the dataset.
         if marketing_sum != 0:
             combined_rows.append(pd.DataFrame([{
                 "order_id": "",
@@ -406,31 +638,38 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
                 "payment_date": payment_date
             }]))
 
+        # Combine all per-statement components into a single DataFrame
         combined_df = pd.concat(combined_rows, ignore_index=True)
         all_rows.append(combined_df)
 
         # =================================================================================================
-        # Print Validation Summary
+        # STEP 9: Per-statement validation summary
         # =================================================================================================
-        refund_sum_lines = df_refunds_by_order["amount"].sum() if not df_refunds_by_order.empty else 0.0
-        subtotal_all = df_full["amount"].sum() if not df_full.empty else 0.0
-        vat_deductions = df_full.loc[~df_full["outside_scope"], "amount"].sum() if not df_full.empty else 0.0
-        refund_total_calc = subtotal_all - vat_deductions
+        # The purpose is to confirm that parsed totals align with the summary values
+        # printed on the PDF (as a sanity check before merging).
+        refund_sum_lines        = df_refunds_by_order["amount"].sum() if not df_refunds_by_order.empty else 0.0
+        subtotal_all            = df_full["amount"].sum() if not df_full.empty else 0.0
+        vat_deductions          = df_full.loc[~df_full["outside_scope"], "amount"].sum() if not df_full.empty else 0.0
+        refund_total_calc       = subtotal_all - vat_deductions
         refund_sum_lines_signed = -refund_sum_lines
 
-        # Derived "You will receive" comparison from parsed values
+        # Compute a derived “You will receive” figure based on parsed components
         derived_receive = None
-        diff_receive = None
+        diff_receive    = None
         if reported_total_sales is not None and reported_you_receive is not None:
-            derived_receive = reported_total_sales + refund_sum_lines_signed + commission_incl_vat + marketing_incl_vat
+            derived_receive = (
+                reported_total_sales
+                + refund_sum_lines_signed
+                + commission_incl_vat
+                + marketing_incl_vat
+            )
             diff_receive = round(derived_receive - reported_you_receive, 2)
 
-        # --- PRINT VALIDATION WITH DELTAS ---
+        # --- Console output for validation checks ---
         print(f"   Header Orders: {reported_order_count:,} | Parsed Orders: {parsed_order_count:,} → Variance: {parsed_order_count - reported_order_count:+}")
         print(f"   Header Total Sales: £{reported_total_sales:,.2f} | Parsed Total Sales: £{parsed_total_sales:,.2f} → Variance: £{parsed_total_sales - reported_total_sales:+.2f}")
         print(f"   Header Refunds: £{refund_total_calc:,.2f} | Parsed Refunds: £{refund_sum_lines_signed:,.2f} → Variance: £{refund_sum_lines_signed + refund_total_calc:+.2f}")
         print(f"   Header Payout: £{reported_you_receive:,.2f} | Parsed Payout: £{derived_receive:,.2f} → Variance: £{diff_receive:+.2f}")
-
         print(f"   Commission + VAT uplift: £{commission_incl_vat:,.2f}")
         print(f"   Marketing + VAT uplift:  £{marketing_incl_vat:,.2f}")
         if reported_you_receive is not None:
@@ -439,51 +678,67 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
             print(f"   💰 Payment Date: {payment_date.strftime('%d %b %Y')}")
 
     # =================================================================================================
-    # Final Merge + Save
+    # STEP 10: Final merge and save consolidated output
     # =================================================================================================
+    # After all individual PDFs have been parsed, merge them into one master DataFrame.
     if not all_rows:
+        # No matching files → return early with a friendly message.
         print("⚠ No PDFs were processed (no matching statements found for the selected period).")
         return "⚠ No matching PDF statements found for this date range. Please check your selected period."
 
+    # Concatenate all DataFrames from the “all_rows” list and order them chronologically.
     merged_all = pd.concat(all_rows, ignore_index=True)
     merged_all = merged_all.sort_values(by=["statement_start", "order_id", "type"]).reset_index(drop=True)
 
-    # Save with filename based on earliest and latest statement dates
+    # ---------------------------------------------------------------------------------------------
+    # STEP 10.1 – Create dynamic filename using earliest and latest statement periods
+    # ---------------------------------------------------------------------------------------------
     earliest_start = merged_all["statement_start"].min()
-    latest_end = merged_all["statement_end"].max()
+    latest_end     = merged_all["statement_end"].max()
 
     if pd.notna(earliest_start) and pd.notna(latest_end):
         start_str = earliest_start.strftime("%y.%m.%d")
-        end_str = latest_end.strftime("%y.%m.%d")
+        end_str   = latest_end.strftime("%y.%m.%d")
         file_name = f"{start_str} - {end_str} - JE Order Level Detail.csv"
     else:
+        # Fallback filename when dates are missing or malformed
         file_name = "JE_Order_Level_Detail.csv"
 
     orders_csv = OUTPUT_FOLDER / file_name
+
+    # ---------------------------------------------------------------------------------------------
+    # STEP 10.2 – Apply consistent column naming and field cleanup
+    # ---------------------------------------------------------------------------------------------
     merged_all.rename(columns=JET_COLUMN_RENAME_MAP, inplace=True, errors="ignore")
 
-    # Clean JE order ID field (remove decimals and symbols)
-    merged_all['je_order_id'] = (
-        merged_all['je_order_id']
+    # Clean JE order ID column:
+    #   - Ensure it’s string typed
+    #   - Strip trailing “.0” artifacts
+    #   - Remove any stray punctuation / non-numeric symbols
+    merged_all["je_order_id"] = (
+        merged_all["je_order_id"]
         .astype(str)
         .str.strip()
         .str.replace(r"\.0$", "", regex=True)
         .str.replace(r"[^0-9]", "", regex=True)
     )
 
-    # Save final consolidated output
+    # ---------------------------------------------------------------------------------------------
+    # STEP 10.4 – Save final consolidated CSV
+    # ---------------------------------------------------------------------------------------------
     merged_all.to_csv(orders_csv, index=False)
     print(f"\n💾 Saved consolidated file → {orders_csv}")
 
     # =================================================================================================
-    # Global Summary
+    # STEP 11: Global summary printed after all PDFs are processed
     # =================================================================================================
+    # Provides at-a-glance totals for QA before proceeding to reconciliation (Step 3).
     print("\n=================== GLOBAL SUMMARY ===================")
-    total_orders = (merged_all["transaction_type"] == "Order").sum()
-    total_refunds = (merged_all["transaction_type"] == "Refund").sum()
-    total_sales = merged_all["je_total"].sum()
-    total_refund_value = merged_all["je_refund"].sum()
-    net_after_refunds = total_sales + total_refund_value
+    total_orders        = (merged_all["transaction_type"] == "Order").sum()
+    total_refunds       = (merged_all["transaction_type"] == "Refund").sum()
+    total_sales         = merged_all["je_total"].sum()
+    total_refund_value  = merged_all["je_refund"].sum()
+    net_after_refunds   = total_sales + total_refund_value
     print(f"Total PDFs:       {len(pdf_files)}")
     print(f"Orders rows:      {total_orders:,}")
     print(f"Refund rows:      {total_refunds:,}")
@@ -492,6 +747,7 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
     print(f"Net after refund: £{net_after_refunds:,.2f}")
     print("======================================================")
 
+    # Return the path to the consolidated output for downstream modules or GUI use
     return orders_csv
 
 # ====================================================================================================
