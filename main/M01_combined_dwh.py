@@ -29,12 +29,10 @@ from pathlib import Path        # Offers an object-oriented interface for filesy
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.dont_write_bytecode = True  # Prevents _pycache_ creation
 
-# Import Project Libraries
-from processes.P00_set_packages import *
-
 # ====================================================================================================
 # Import shared functions and file paths from other folders
 # ====================================================================================================
+from processes.P00_set_packages import *
 from processes.P01_set_file_paths import provider_dwh_folder, provider_output_folder
 from processes.P04_static_lists import DWH_COLUMN_RENAME_MAP
 
@@ -74,11 +72,11 @@ def combine_je_dwh_files(dwh_folder: Path, output_folder: Path):
     final_df = pd.concat(combined_df, ignore_index=True)
 
     # Rename columns using standardized mapping
-    final_df.rename(columns=DWH_COLUMN_RENAME_MAP, inplace=True, errors="ignore")
+    # final_df.rename(columns=DWH_COLUMN_RENAME_MAP, inplace=True, errors="ignore")
 
     # Clean JE order ID – remove trailing '.0', spaces, and non-numeric characters
-    final_df['je_order_id'] = (
-        final_df['je_order_id']
+    final_df['MP_ORDER_ID'] = (
+        final_df['MP_ORDER_ID']
         .astype(str)
         .str.strip()
         .str.replace(r"\.0$", "", regex=True)
@@ -86,7 +84,10 @@ def combine_je_dwh_files(dwh_folder: Path, output_folder: Path):
     )
 
     # Sort by gp_order_id descending for consistency
-    final_df = final_df.sort_values('gp_order_id', ascending=False).reset_index(drop=True)
+    final_df = final_df.sort_values('GP_ORDER_ID', ascending=False).reset_index(drop=True)
+
+    # Produce Revenues
+    
 
     # Define and save output path
     output_path = output_folder / "je_dwh_all.csv"

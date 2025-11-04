@@ -13,6 +13,8 @@ import getpass                                                  # Securely get c
 import threading                                                # Run code concurrently using threads
 import queue                                                    # Thread-safe FIFO queue for communication between threads
 import tkinter as tk                                            # Standard Python GUI toolkit
+import datetime as dt
+import traceback
 from datetime import date, datetime, timedelta                  # Date and time handling
 from urllib.parse import (                                      # URL utilities (parsing & building URLs safely)
     urljoin,                                                    # Join base + relative URLs

@@ -40,7 +40,7 @@ from processes.P00_set_packages import *
 
 from processes.P00_set_packages import *
 from processes.P01_set_file_paths import provider_pdf_folder, provider_pdf_unprocessed_folder, provider_output_folder, provider_refund_folder
-from processes.P03_shared_functions import statement_overlaps_file
+from processes.P03_shared_functions import statement_overlaps_file, get_je_statement_coverage
 from processes.P04_static_lists import JET_COLUMN_RENAME_MAP
 
 # ====================================================================================================
@@ -362,39 +362,40 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
         print(f"📅 Restricting to PDFs overlapping {gui_start} → {gui_end}")
 
     # ---------------------------------------------------------------------------------------------
-    # STEP 3: Filename-based date filter (fast pre-check before heavy PDF parsing)
+    # STEP 3: Determine JE coverage within the GUI-selected accounting window
     # ---------------------------------------------------------------------------------------------
-    # Many JE Statements follow the “YY.MM.DD” pattern in the filename.
-    # We can extract that quickly to determine the statement’s starting Monday.
-    # This avoids unnecessary I/O when the GUI date range is narrow.
-    filename_pattern = re.compile(r"(\d{2})\.(\d{2})\.(\d{2})", re.I)
-    valid_files = []   # Will collect only those files whose period overlaps the selected range
+    first_monday, last_monday = get_je_statement_coverage(
+        pdf_folder,
+        gui_start,
+        gui_end
+    )
 
-    for pdf_path in pdf_files:
-        # Try to extract “YY.MM.DD” from the filename.
-        m = filename_pattern.search(pdf_path.name)
+    if not first_monday or not last_monday:
+        raise FileNotFoundError(f"No JE statements overlap {gui_start} → {gui_end} in {pdf_folder}")
+
+    print(f"📅 JE statements within selected range: {first_monday} → {last_monday}")
+
+    # Apply GUI filtering (optional – user might limit by accounting range)
+    if gui_start and gui_end:
+        print(f"🧭 Limiting to PDFs overlapping {gui_start} → {gui_end}")
+
+    valid_files = []
+    for pdf_path in sorted(pdf_folder.glob("*JE Statement*.pdf")):
+        m = re.search(r"(\d{2})\.(\d{2})\.(\d{2})", pdf_path.name)
         if not m:
-            # If no date pattern exists, we can’t infer the week start → skip but log the reason.
-            print(f"⚠ Could not parse start date from filename: {pdf_path.name}")
             continue
-
-        # Rebuild a full date object: prepend “20” to the 2-digit year.
         start = datetime.strptime(f"20{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d").date()
-        end   = start + timedelta(days=6)   # Each statement always covers 7 days (Mon–Sun).
+        end = start + timedelta(days=6)  # Mon→Sun
 
-        # Use helper statement_overlaps_file() to decide if this weekly period intersects
-        # the GUI-selected date window.
         if statement_overlaps_file(str(start), str(end), str(gui_start), str(gui_end)):
             valid_files.append(pdf_path)
         else:
-            # If outside the selected window, explain exactly which week was skipped.
-            print(f"⏭ Skipped {pdf_path.name} (covers {start} → {end}, outside {gui_start} → {gui_end})")
+            print(f"⏭ Skipped {pdf_path.name} (covers {start} → {end}, outside selected range)")
 
-    # Replace the full list with the filtered subset.
     pdf_files = valid_files
-    print(f"📄 {len(pdf_files)} PDF(s) remain after filename filter.")
+    print(f"📄 {len(pdf_files)} PDF(s) selected for processing.")
 
-        # =================================================================================================
+    # =================================================================================================
     # STEP 4: Loop through each valid PDF and extract all required details
     # =================================================================================================
     all_rows = []   # Collects one combined DataFrame per PDF before merging
@@ -691,17 +692,15 @@ def run_je_parser(pdf_folder: Path, output_folder: Path, start_date: str = None,
     merged_all = merged_all.sort_values(by=["statement_start", "order_id", "type"]).reset_index(drop=True)
 
     # ---------------------------------------------------------------------------------------------
-    # STEP 10.1 – Create dynamic filename using earliest and latest statement periods
+    # STEP 10.1 – Create dynamic filename using the statements we actually processed
     # ---------------------------------------------------------------------------------------------
-    earliest_start = merged_all["statement_start"].min()
-    latest_end     = merged_all["statement_end"].max()
+    # Derive Mondays from the merged data (statement_start is the Monday of each week)
+    first_monday = pd.to_datetime(merged_all["statement_start"]).dt.date.min()
+    last_monday  = pd.to_datetime(merged_all["statement_start"]).dt.date.max()
 
-    if pd.notna(earliest_start) and pd.notna(latest_end):
-        start_str = earliest_start.strftime("%y.%m.%d")
-        end_str   = latest_end.strftime("%y.%m.%d")
-        file_name = f"{start_str} - {end_str} - JE Order Level Detail.csv"
+    if first_monday and last_monday:
+        file_name = f"{first_monday:%y.%m.%d} - {last_monday:%y.%m.%d} - JE Order Level Detail.csv"
     else:
-        # Fallback filename when dates are missing or malformed
         file_name = "JE_Order_Level_Detail.csv"
 
     orders_csv = OUTPUT_FOLDER / file_name

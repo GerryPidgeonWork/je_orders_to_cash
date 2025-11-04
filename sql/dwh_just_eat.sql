@@ -11,9 +11,9 @@ USE DATABASE dbt_prod;
 
 WITH reporting_period AS (
     SELECT
-        '2024-12-01' AS reporting_start_date_day
-        , '2024-12-31' AS  reporting_end_date_day)
-
+        '2025-10-01' AS reporting_start_date_day
+        , '2025-10-31' AS  reporting_end_date_day)
+        
 -- ===============================
 -- Pull Location Data for base query
 -- ===============================
@@ -63,6 +63,22 @@ WITH reporting_period AS (
         AND DATE_TRUNC('DAY', o.ops_date)::DATE <= rp.reporting_end_date_day
         AND o.country_code = 'GB'
         AND LOWER(o.order_vendor) != 'gopuff'
+)
+
+-- ===============================
+-- Pull Item Data for base query
+-- ===============================
+
+, item_level_list AS (
+    SELECT
+        *
+
+    FROM
+        core.eu_order_items as eoi
+        LEFT JOIN order_list AS ol ON ol.order_id = eoi.order_id
+
+    WHERE
+        ol.order_id IS NOT NULL
 )
 
 -- ===============================

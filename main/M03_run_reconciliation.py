@@ -1,300 +1,294 @@
 # ====================================================================================================
 # M03_run_reconciliation.py
 # ----------------------------------------------------------------------------------------------------
-# Step 3 – Just Eat Orders-to-Cash Reconciliation
+# Step 3 – Run Reconciliation
 # ----------------------------------------------------------------------------------------------------
 # Purpose:
-# - Reconciles parsed Just Eat statement data against the combined DWH export.
-# - Identifies matched orders, missing orders, refunds without DWH matches, and accruals.
-# - Produces a date-stamped reconciliation CSV summarising all JE and DWH relationships.
+# - Matches JE Order Level Detail CSV (from PDFs) with combined DWH data.
+# - Determines which period is statement-covered and which requires accruals.
+# - Returns output file path for downstream processing or GUI message.
 # ----------------------------------------------------------------------------------------------------
-# Inputs:
-#   - je_dwh_all.csv (from Step 1)
-#   - <yy.mm.dd> - <yy.mm.dd> - JE Order Level Detail.csv (from Step 2)
-# Outputs:
-#   - <yy.mm.dd> - <yy.mm.dd> - JE Reconciliation Results.csv
-# ----------------------------------------------------------------------------------------------------
-# Notes:
-#   - Commission and Marketing rows are excluded from missing-in-DWH logic.
-#   - Accruals are derived from completed DWH orders after the last JE statement period.
-#   - All merges and filters are date-safe and GUI-friendly for threaded operation.
+# Updated:
+# - Receives all 5 GUI dates directly from M00_run_gui.py
+# - Derives statement + accrual periods internally
+# - Simplified JE file detection (no redundant checks)
 # ====================================================================================================
 
-# ====================================================================================================
-# Import Libraries that are required to adjust sys path
-# ====================================================================================================
-import sys                      # Provides access to system-specific parameters and functions
-from pathlib import Path        # Offers an object-oriented interface for filesystem paths
+import sys
+from pathlib import Path
 
-# Adjust sys.path so we can import modules from the parent folder
+# Adjust sys.path so we can import from parent folder (../processes/)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.dont_write_bytecode = True  # Prevents _pycache_ creation
-
-# Import Project Libraries
-from processes.P00_set_packages import *
+sys.dont_write_bytecode = True
 
 # ====================================================================================================
-# Import shared functions and file paths from other folders
+# Import Project Packages and Shared Modules
 # ====================================================================================================
-from processes.P00_set_packages import *
-from processes.P01_set_file_paths import provider_output_folder
-from processes.P03_shared_functions import statement_overlaps_file
+from processes.P00_set_packages import *  # Standardised imports (pandas, numpy, datetime as dt, etc.)
+from processes.P01_set_file_paths import provider_output_folder, provider_pdf_unprocessed_folder
+from processes.P02_system_processes import user_download_folder
+from processes.P03_shared_functions import get_je_statement_coverage
 from processes.P04_static_lists import DWH_COLUMN_RENAME_MAP, JET_COLUMN_RENAME_MAP
-
-# ====================================================================================================
-# Helper – Find Matching JE Statement File
-# ====================================================================================================
-
-def find_matching_statement_file(output_folder: Path, start_date: str, end_date: str) -> Path:
-    """
-    Find the JE Statement file that best matches the selected GUI date range.
-
-    Logic priority:
-    1️⃣ Prefer a file that fully covers the GUI range (start ≤ GUI start AND end ≥ GUI end)
-    2️⃣ Otherwise, choose the file with the largest overlap period
-    """
-    gui_start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    gui_end = datetime.strptime(end_date, "%Y-%m-%d").date()
-
-    pattern = re.compile(
-        r"(\d{2})\.(\d{2})\.(\d{2}) - (\d{2})\.(\d{2})\.(\d{2}) - JE Order Level Detail\.csv$",
-        re.I,
-    )
-
-    matching_files = []
-
-    for file in output_folder.glob("*JE Order Level Detail.csv"):
-        m = pattern.search(file.name)
-        if not m:
-            continue
-
-        start = datetime.strptime(f"20{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d").date()
-        end = datetime.strptime(f"20{m.group(4)}-{m.group(5)}-{m.group(6)}", "%Y-%m-%d").date()
-
-        # Skip invalid ranges
-        if start > end:
-            continue
-
-        # Calculate overlap days
-        if end < gui_start or start > gui_end:
-            continue
-        overlap_start = max(gui_start, start)
-        overlap_end = min(gui_end, end)
-        overlap_days = (overlap_end - overlap_start).days + 1
-
-        # Track file info
-        matching_files.append((file, start, end, overlap_days))
-
-    if not matching_files:
-        raise FileNotFoundError(
-            f"No JE Statement file found in '{output_folder}' overlapping {gui_start} → {gui_end}.\n"
-            f"Please run Step 2 (Process PDFs) first or choose a matching range."
-        )
-
-    # ✅ 1️⃣ Try to find a file that fully contains the GUI range
-    full_cover = [
-        (f, s, e, d)
-        for f, s, e, d in matching_files
-        if s <= gui_start and e >= gui_end
-    ]
-    if full_cover:
-        chosen_file = full_cover[0][0]
-        print(f"✅ Found fully covering JE Statement: {chosen_file.name}")
-        return chosen_file
-
-    # ✅ 2️⃣ Otherwise pick the one with largest overlap
-    matching_files.sort(key=lambda x: x[3], reverse=True)
-    chosen_file = matching_files[0][0]
-    print(f"✅ Found overlapping JE Statement: {chosen_file.name}")
-    return chosen_file
-
-# ====================================================================================================
-# Utility – Clean JE Order ID
-# ====================================================================================================
-
-def _clean_je_order_id(series: pd.Series) -> pd.Series:
-    """Normalise order IDs (strip, remove decimals/non-numeric). Keeps blanks intact."""
-    return (
-        series.astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
-        .str.replace(r"[^0-9]", "", regex=True)
-    )
 
 # ====================================================================================================
 # Main Reconciliation Function
 # ====================================================================================================
 
-def run_reconciliation(output_folder: Path, start_date: str, end_date: str):
+def run_reconciliation(provider_output_folder, acc_start, acc_end, stmt_start, stmt_end, stmt_auto_end):
     """
-    Perform full reconciliation between Just Eat statement data and DWH export.
+    Runs the Just Eat reconciliation process for the selected accounting and statement periods.
 
-    Steps:
-    1. Load both JE and DWH datasets.
-    2. Standardise columns and clean order IDs.
-    3. Merge JE ↔ DWH to classify matches, missing-in-DWH, and non-order rows.
-    4. Identify missing JE orders and accruals based on GUI date range.
-    5. Output a single, date-stamped reconciliation CSV.
+    Parameters:
+        provider_output_folder (Path): Folder containing DWH and JE CSVs
+        acc_start (str): Accounting period start date (YYYY-MM-DD)
+        acc_end (str): Accounting period end date (YYYY-MM-DD)
+        stmt_start (str): JE statement start date
+        stmt_end (str): JE statement end (Monday of last statement week)
+        stmt_auto_end (str): JE statement auto-calculated end (Sunday of last week)
 
     Returns:
-        Path to the reconciliation output file (or warning message for GUI).
+        str: Path to the reconciliation output CSV (or raises FileNotFoundError)
     """
-    try:
-        print("\n=================== JUST EAT RECONCILIATION ===================")
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 0 — Load Required Files
-        # ------------------------------------------------------------------------------------------------
-        dwh_file = output_folder / "je_dwh_all.csv"
-        if not dwh_file.exists():
-            raise FileNotFoundError("DWH file not found — please run Step 1 (Combine DWH Data) first.")
+    # =================================================================================================
+    # Convert all incoming GUI date values (str or date) to date objects
+    # =================================================================================================
+    def parse_date(d):
+        """Safely parse a string or return the date unchanged."""
+        return d if isinstance(d, dt.date) else dt.datetime.strptime(d, "%Y-%m-%d").date()
 
-        je_statement = find_matching_statement_file(output_folder, start_date, end_date)
+    acc_start = parse_date(acc_start)
+    acc_end = parse_date(acc_end)
+    stmt_start_dt = parse_date(stmt_start)
+    stmt_end_dt = parse_date(stmt_end)
+    stmt_auto_dt = parse_date(stmt_auto_end)
 
-        # Read data as strings for compatibility
-        print(f"📂 Loading DWH Combined: {dwh_file.name}")
-        dwh_df = pd.read_csv(dwh_file, dtype=str)
-        print(f"📂 Loading JE Statement: {je_statement.name}")
-        je_df = pd.read_csv(je_statement, dtype=str)
+    # =================================================================================================
+    # Derive working date ranges
+    # =================================================================================================
+    data_start = acc_start
+    data_statement_end = max(stmt_auto_dt, acc_end)
 
-        gui_start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        gui_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    # Determine accrual range only if needed
+    if stmt_auto_dt < acc_end:
+        data_accrue_start = stmt_auto_dt + dt.timedelta(days=1)
+        data_accrue_end = acc_end
+        accrual_text = f"{data_accrue_start} → {data_accrue_end}"
+    else:
+        data_accrue_start = None
+        data_accrue_end = None
+        accrual_text = "Not Needed"
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 1 — Prepare DWH (Full Dataset, No Filter)
-        # ------------------------------------------------------------------------------------------------
-        dwh_df.rename(columns=DWH_COLUMN_RENAME_MAP, inplace=True, errors="ignore")
+    print("🗓 Derived Periods:")
+    print(f" - Accounting Start:   {acc_start}")
+    print(f" - Accounting End:     {acc_end}")
+    print(f" - Statement Start:    {stmt_start_dt}")
+    print(f" - Statement End:      {stmt_auto_end}")
+    print(f" - Data Start:         {data_start}")
+    print(f" - Statement Coverage: {data_statement_end}")
+    print(f" - Accrual Period:     {accrual_text}")
+    print("----------------------------------------------------------------------------------")
 
-        # Parse gp_date column safely
-        if "gp_date" in dwh_df.columns:
-            dwh_df["gp_date"] = pd.to_datetime(dwh_df["gp_date"], errors="coerce").dt.date
-        else:
-            dwh_df["gp_date"] = pd.NaT
+    # =================================================================================================
+    # Step 0 — Verify Combined DWH File
+    # =================================================================================================
+    dwh_file = provider_output_folder / "je_dwh_all.csv"
+    if not dwh_file.exists():
+        raise FileNotFoundError("DWH file not found — please run Step 1 (Combine DWH Data) first.")
+    print(f"📊 Found DWH file: {dwh_file.name}")
 
-        # Clean JE order ID from DWH export
-        dwh_df["je_order_id"] = _clean_je_order_id(dwh_df.get("je_order_id", pd.Series(dtype=str)))
+    # =================================================================================================
+    # Step 1 — Identify JE Statement File Based on GUI Statement Dates
+    # =================================================================================================
+    print(f"🔍 Looking for JE Order Level Detail file for statement period: {stmt_start_dt} → {stmt_end_dt}")
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 2 — Prepare JE (Full Dataset, No Filter)
-        # ------------------------------------------------------------------------------------------------
-        je_df.rename(columns=JET_COLUMN_RENAME_MAP, inplace=True, errors="ignore")
-        je_df["je_order_id"] = _clean_je_order_id(je_df.get("je_order_id", pd.Series(dtype=str)))
+    # Build exact expected filename from GUI-provided statement dates
+    expected_filename = f"{stmt_start_dt:%y.%m.%d} - {stmt_end_dt:%y.%m.%d} - JE Order Level Detail.csv"
+    expected_path = provider_output_folder / expected_filename
 
-        print(f"🧾 Loaded JE records: {len(je_df):,}")
-        overlap_before = len(set(je_df["je_order_id"]) & set(dwh_df["je_order_id"]))
-        print(f"🔍 Overlap (JE vs DWH) before any filtering: {overlap_before:,}")
+    # Print what the script is looking for
+    print(f"🔎 Expected file name: {expected_filename}")
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 3 — Enrich JE with DWH Data
-        # ------------------------------------------------------------------------------------------------
-        merged = je_df.merge(
-            dwh_df,
-            on="je_order_id",
-            how="left",
-            suffixes=("", "_dwh")
+    # Check if the file exists
+    if expected_path.exists():
+        je_statement = expected_path
+        print(f"✅ Found JE Order Level Detail file: {je_statement.name}")
+    else:
+        # Gather all possible JE statement files to display for debugging
+        available_csvs = [f.name for f in provider_output_folder.glob("*JE Order Level Detail*.csv")]
+        raise FileNotFoundError(
+            f"❌ JE Order Level Detail file not found for statement period {stmt_start_dt} → {stmt_end_dt}.\n"
+            f"Expected file:\n  {expected_filename}\n\n"
+            f"Please run Step 2 (Extract PDFs) to generate this file.\n\n"
+            f"Available files in folder:\n  " + "\n  ".join(available_csvs)
         )
+    
+    # =================================================================================================
+    # Step 2 — Load and filter PDF (JE Order Level Detail) data
+    # =================================================================================================
+    print("----------------------------------------------------------------------------------")
+    print("📂 Loading JE Statement data...")
+    je_df = pd.read_csv(je_statement)
+    print(f"✅ JE rows (raw): {len(je_df):,}")
 
-        # Tag records by reconciliation type
-        nonorder_mask = merged["transaction_type"].isin(["Commission", "Marketing"])
-        has_dwh_match = merged["order_completed"].notna()
+    # --- Filter DWH to align with GUI dates ---
+    print("📂 Loading DWH data...")
+    dwh_df = pd.read_csv(dwh_file)
+    print(f"✅ DWH rows (raw): {len(dwh_df):,}")
+    dwh_df['order_category'] = ''
 
-        merged["status_flag"] = np.where(
-            nonorder_mask, "NonOrder_JE",
-            np.where(has_dwh_match, "Matched", "Missing_in_DWH")
+    # =================================================================================================
+    # Step 3 — Populate all data from DWH
+    # =================================================================================================
+    # --- Case 1: Orders (full DWH merge) ---
+    je_orders = je_df.loc[je_df['transaction_type'] == 'Order'].copy()
+    je_orders = pd.merge(je_orders, dwh_df, left_on='je_order_id', right_on='MP_ORDER_ID', how='left')
+    je_orders['order_category'] = 'Matched'
+
+    # --- Case 2: Refunds (partial DWH merge, only metadata) ---
+    je_refunds = je_df.loc[je_df['transaction_type'] == 'Refund'].copy()
+    je_refunds = pd.merge( je_refunds, dwh_df[['MP_ORDER_ID', 'GP_ORDER_ID', 'GP_ORDER_ID_OBFUSCATED',
+                'LOCATION_NAME', 'ORDER_VENDOR', 'VENDOR_GROUP', 'ORDER_COMPLETED',
+                'CREATED_AT_DAY', 'CREATED_AT_WEEK', 'CREATED_AT_MONTH', 
+                'DELIVERED_AT_DAY', 'DELIVERED_AT_WEEK', 'DELIVERED_AT_MONTH', 
+                'OPS_DATE_DAY', 'OPS_DATE_WEEK', 'OPS_DATE_MONTH']],
+                left_on='je_order_id', right_on='MP_ORDER_ID', how='left')
+    je_refunds['order_category'] = 'Matched'
+
+    # --- Case 3: Commission (JE only, no DWH merge) ---
+    je_commission = je_df.loc[je_df['transaction_type'] == 'Commission'].copy()
+    je_commission['order_category'] = 'Commission'
+
+    # --- Case 4: Marketing (JE only, no DWH merge) ---
+    je_marketing = je_df.loc[je_df['transaction_type'] == 'Marketing'].copy()
+    je_marketing['order_category'] = 'Marketing'
+
+    # --- Combine all together ---
+    je_df = pd.concat([je_orders, je_refunds, je_commission, je_marketing], ignore_index=True)
+
+    print(f"✅ Final JE rows after combining all transaction types: {len(je_df):,}")
+
+    # =================================================================================================
+    # Step 4 — Add any completed DWH orders not in JE data (based on CREATED_AT_DAY)
+    # =================================================================================================
+    print("----------------------------------------------------------------------------------")
+    print("🔍 Checking for missing completed DWH orders not in JE data (using CREATED_AT_DAY)...")
+
+    # Ensure CREATED_AT_DAY is a proper date
+    dwh_df['CREATED_AT_DAY'] = pd.to_datetime(dwh_df['CREATED_AT_DAY'], errors='coerce').dt.date
+
+    # Filter DWH for completed orders in the statement window
+    mask_dwh_window = (
+        (dwh_df['CREATED_AT_DAY'] >= stmt_start_dt) &
+        (dwh_df['CREATED_AT_DAY'] <= stmt_auto_dt) &
+        (dwh_df['ORDER_COMPLETED'] == 1)
+    )
+    dwh_window = dwh_df.loc[mask_dwh_window].copy()
+
+    print(f"📅 DWH completed orders in statement window ({stmt_start_dt} → {stmt_auto_dt}): {len(dwh_window):,}")
+
+    # Identify orders not already in JE data
+    existing_je_orders = set(je_df['je_order_id'].dropna().astype(str))
+    missing_dwh = dwh_window.loc[~dwh_window['MP_ORDER_ID'].astype(str).isin(existing_je_orders)].copy()
+
+    # Label missing ones
+    missing_dwh['order_category'] = 'Missing in Statement'
+    missing_dwh['transaction_type'] = 'Order'
+    missing_dwh['je_order_id'] = missing_dwh['MP_ORDER_ID']
+    missing_dwh['je_total'] = missing_dwh['TOTAL_PAYMENT_WITH_TIPS_INC_VAT']
+    missing_dwh['je_refund'] = 0
+
+    # Combine with existing JE dataframe
+    final_df = pd.concat([je_df, missing_dwh], ignore_index=True)
+
+    print(f"✅ Added {len(missing_dwh):,} missing completed orders from DWH.")
+    print(f"📊 Final combined rows: {len(final_df):,}")
+    print("----------------------------------------------------------------------------------")
+
+    # =================================================================================================
+    # Step 5 — Add completed DWH orders after statement end (true accruals)
+    # =================================================================================================
+    if data_accrue_start and data_accrue_end:
+        print("----------------------------------------------------------------------------------")
+        print(f"🧾 Adding accrual orders from DWH between {data_accrue_start} → {data_accrue_end}...")
+
+        # Ensure CREATED_AT_DAY is in datetime.date format
+        dwh_df['CREATED_AT_DAY'] = pd.to_datetime(dwh_df['CREATED_AT_DAY'], errors='coerce').dt.date
+
+        # Filter DWH for accrual period completed orders
+        mask_accrual = (
+            (dwh_df['CREATED_AT_DAY'] >= data_accrue_start) &
+            (dwh_df['CREATED_AT_DAY'] <= data_accrue_end) &
+            (dwh_df['ORDER_COMPLETED'] == 1)
         )
+        accrual_orders = dwh_df.loc[mask_accrual].copy()
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 3b — 🔒 LOCKED: Remove any DWH data paired to non-order JE rows
-        # ------------------------------------------------------------------------------------------------
-        # Purpose:
-        # Commission and Marketing lines in JE statements are summary-level rows.
-        # They must NOT be joined to any DWH data (no order_id, gp_date, etc.).
-        # This ensures they never appear as "Matched" or distort totals.
-        #
-        # 🔒 IMPORTANT — DO NOT REMOVE OR MODIFY THIS BLOCK.
-        # It guarantees financial isolation between JE non-order rows and DWH order data.
-        # ------------------------------------------------------------------------------------------------
-        dwh_cols = [
-            col for col in merged.columns
-            if col.endswith("_dwh") or col in dwh_df.columns
-        ]
+        # Exclude any already present in JE (for safety)
+        existing_orders = set(final_df['je_order_id'].dropna().astype(str))
+        accrual_orders = accrual_orders.loc[~accrual_orders['MP_ORDER_ID'].astype(str).isin(existing_orders)].copy()
 
-        # Zero-out / clear all DWH fields for Commission & Marketing rows
-        merged.loc[merged["transaction_type"].isin(["Commission", "Marketing"]), dwh_cols] = np.nan
+        # Label accruals
+        accrual_orders['order_category'] = 'Accrual (Post-Statement)'
+        accrual_orders['transaction_type'] = 'Order'
+        accrual_orders['je_order_id'] = accrual_orders['MP_ORDER_ID']
+        accrual_orders['je_total'] = accrual_orders['TOTAL_PAYMENT_WITH_TIPS_INC_VAT']
+        accrual_orders['je_refund'] = 0
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 4 — Identify DWH Orders Missing from JE
-        # ------------------------------------------------------------------------------------------------
-        dwh_in_window = dwh_df[
-            (dwh_df["gp_date"] >= gui_start) & (dwh_df["gp_date"] <= gui_end)
-        ].copy()
+        # Append to final dataframe
+        final_df = pd.concat([final_df, accrual_orders], ignore_index=True)
 
-        je_ids = set(je_df["je_order_id"])
-        missing_from_je = dwh_in_window[
-            (dwh_in_window["order_completed"] == "1")
-            & (~dwh_in_window["je_order_id"].isin(je_ids))
-            & (dwh_in_window["je_order_id"] != "")
-        ].copy()
-        missing_from_je["status_flag"] = "Missing_from_JE"
-        print(f"📉 Missing from JE: {len(missing_from_je):,}")
+        print(f"✅ Added {len(accrual_orders):,} accrual orders from DWH.")
+        print(f"📊 Final combined rows: {len(final_df):,}")
+    else:
+        print("🟢 No accrual period required — skipping accrual detection.")
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 5 — Add Month-End Accruals (Post-Statement Orders)
-        # ------------------------------------------------------------------------------------------------
-        latest_statement_end = None
-        if "statement_end" in je_df.columns:
-            latest_statement_end = pd.to_datetime(je_df["statement_end"], errors="coerce").dt.date.max()
+    # =================================================================================================
+    # Step 6 — Clean Data
+    # =================================================================================================
 
-        accrual_orders = pd.DataFrame()
-        if latest_statement_end and latest_statement_end < gui_end:
-            accrual_orders = dwh_df[
-                (dwh_df["order_completed"] == "1")
-                & (dwh_df["gp_date"] > latest_statement_end)
-                & (dwh_df["gp_date"] <= gui_end)
-                & (~dwh_df["je_order_id"].isin(je_ids))
-                & (dwh_df["je_order_id"] != "")
-            ].copy()
-            accrual_orders["status_flag"] = "Accrual_from_DWH"
-            print(f"📊 Added {len(accrual_orders):,} accrual orders (post-statement).")
+    final_df['je_order_id'] = (final_df['je_order_id'].replace(r'^\s*$', np.nan, regex=True).replace('', np.nan))
+    final_df['je_order_id'] = pd.to_numeric(final_df['je_order_id'], errors='coerce').astype('Int64') 
+  
+    # --- List all columns that should be treated as dates ---
+    date_columns = ['je_date', 'CREATED_AT_DAY', 'DELIVERED_AT_DAY', 'OPS_DATE_DAY', 'CREATED_AT_WEEK', 'DELIVERED_AT_WEEK', 'OPS_DATE_WEEK', 'CREATED_AT_MONTH', 'DELIVERED_AT_MONTH', 'OPS_DATE_MONTH']
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 6 — Combine All Results and Save
-        # ------------------------------------------------------------------------------------------------
-        final = pd.concat([merged, missing_from_je, accrual_orders], ignore_index=True, sort=False)
+    # --- Apply the same cleaning logic to each existing column ---
+    for col in date_columns:
+        if col in final_df.columns:
+            final_df[col] = final_df[col].replace(r'^\s*$', np.nan, regex=True)
+            final_df[col] = pd.to_datetime(final_df[col], format='%d/%m/%y', errors='coerce').fillna(pd.to_datetime(final_df[col], format='%Y-%m-%d', errors='coerce'))
+            final_df[col] = final_df[col].dt.strftime('%Y-%m-%d')
+            final_df.loc[final_df[col].isna(), col] = np.nan
+            print(f"🗓 Cleaned {col}: {final_df[col].notna().sum():,} valid dates")
 
-        out_name = f"{start_date.replace('-', '.')[2:]} - {end_date.replace('-', '.')[2:]} - JE Reconciliation Results.csv"
-        out_path = output_folder / out_name
-        final.to_csv(out_path, index=False, encoding="utf-8-sig")
+    final_df['MP_ORDER_ID'] = np.where(final_df['MP_ORDER_ID'].isna(), final_df['je_order_id'], final_df['MP_ORDER_ID'])
+    final_df.columns = final_df.columns.str.strip().str.lower().str.replace(' ', '_', regex=False).str.replace(r'[^\w_]', '', regex=True)
 
-        # ------------------------------------------------------------------------------------------------
-        # Step 7 — Summary Output
-        # ------------------------------------------------------------------------------------------------
-        print(f"\n💾 Saved reconciliation file → {out_path}")
-        print(f"Matched: {(final['status_flag'] == 'Matched').sum():,}")
-        print(f"Missing in DWH (Orders/Refunds only): {(final['status_flag'] == 'Missing_in_DWH').sum():,}")
-        print(f"Missing from JE: {(final['status_flag'] == 'Missing_from_JE').sum():,}")
-        print(f"Accrual from DWH: {(final['status_flag'] == 'Accrual_from_DWH').sum():,}")
-        print(f"Non-order JE rows (Commission/Marketing): {(final['status_flag'] == 'NonOrder_JE').sum():,}")
-        print("===============================================================")
+    mask = final_df['transaction_type'] == 'Order'
+    final_df.loc[mask, 'matched_amount'] = np.where(final_df.loc[mask, 'je_total'].fillna(0).round(2) == final_df.loc[mask, 'total_payment_with_tips_inc_vat'].fillna(0).round(2), 'Matched', 'Not Matched')
+    final_df.loc[mask, 'amount_variance'] = np.where(final_df.loc[mask, 'je_total'].fillna(0).round(2) == final_df.loc[mask, 'total_payment_with_tips_inc_vat'].fillna(0).round(2), 0, (final_df.loc[mask, 'je_total'].fillna(0).round(2) - final_df.loc[mask, 'total_payment_with_tips_inc_vat'].fillna(0).round(2)).round(2))
 
-        return out_path
+    mask = final_df['transaction_type'].isin(['Refund', 'Commission', 'Marketing'])
+    final_df.loc[mask, 'matched_amount'] = 'Ignore'
+    final_df.loc[mask, 'amount_variance'] = 0
 
-    # ------------------------------------------------------------------------------------------------
-    # Error Handling (Friendly for GUI)
-    # ------------------------------------------------------------------------------------------------
-    except FileNotFoundError as e:
-        print(f"❌ {e}")
-        return f"⚠ {str(e)}"
+    final_df = final_df[['gp_order_id', 'gp_order_id_obfuscated', 'mp_order_id', 'statement_start', 'transaction_type', 'order_category', 'matched_amount', 'amount_variance', 
+                         'je_total', 'je_refund', 'location_name', 'order_vendor', 'vendor_group', 'order_completed', 'created_at_day', 'created_at_week', 'created_at_month', 
+                         'post_promo_sales_inc_vat', 'delivery_fee_inc_vat', 'priority_fee_inc_vat', 'small_order_fee_inc_vat', 'mp_bag_fee_inc_vat', 'total_payment_inc_vat', 
+                         'tips_amount', 'total_payment_with_tips_inc_vat', 'post_promo_sales_exc_vat', 'delivery_fee_exc_vat', 'priority_fee_exc_vat', 'small_order_fee_exc_vat', 
+                         'mp_bag_fee_exc_vat', 'total_revenue_exc_vat', 'cost_of_goods_inc_vat', 'cost_of_goods_exc_vat',  'total_products', 'item_quantity_count_0', 
+                         'item_quantity_count_5', 'item_quantity_count_20', 'total_price_exc_vat_0', 'total_price_exc_vat_5', 'total_price_exc_vat_20', 'total_price_inc_vat_0', 
+                         'total_price_inc_vat_5', 'total_price_inc_vat_20']]
+    
+    final_df = final_df.sort_values(by = 'gp_order_id')
+    
+    # =================================================================================================
+    # Step 7 — Save and Return Output Path
+    # =================================================================================================
+    output_path = provider_output_folder / f"{stmt_start_dt:%y.%m.%d} - {stmt_end_dt:%y.%m.%d} - JE Reconciliation.csv"
+    final_df.to_csv(output_path, index=False)
+    print(f"💾 Output written to: {output_path}")
+    print("✅ Reconciliation completed successfully.")
+    print("----------------------------------------------------------------------------------")
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print("❌ Error during reconciliation. Please check the selected date range.")
-        return "⚠ The selected period does not align with available statements. Please run the matching period."
-
-# # ====================================================================================================
-# # DIRECT EXECUTION (for testing)
-# # ====================================================================================================
-# if __name__ == "__main__":
-#     # Allows standalone execution for testing purposes
-#     run_reconciliation(provider_output_folder, "2025-09-01", "2025-09-30")
+    return output_path

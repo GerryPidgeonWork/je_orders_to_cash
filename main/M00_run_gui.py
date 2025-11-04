@@ -127,18 +127,27 @@ def run_process_pdfs(gui: JustEatReconciliationGUI, start_date: str, end_date: s
 # Step 3 – Run Reconciliation Handler
 # ====================================================================================================
 
-def run_reconciliation_gui(gui: JustEatReconciliationGUI, start_date: str, end_date: str):
-    """Executes Step 3 (Run Reconciliation) using selected GUI date range."""
+# ====================================================================================================
+# Step 3 – Run Reconciliation Handler
+# ====================================================================================================
+
+def run_reconciliation_gui(gui: JustEatReconciliationGUI, dates: dict):
+    """Executes Step 3 (Run Reconciliation) using all 5 GUI dates."""
     def task():
         try:
-            gui.status_label.config(text=f"🔄 Running reconciliation ({start_date} → {end_date})...")
+            gui.status_label.config(
+                text=f"🔄 Running reconciliation ({dates['acc_start']} → {dates['acc_end']})..."
+            )
             gui.progress.start(10)
 
             output_path = run_reconciliation(
                 provider_output_folder,
-                start_date=start_date,
-                end_date=end_date
-            )
+                acc_start=dates['acc_start'],
+                acc_end=dates['acc_end'],
+                stmt_start=dates['stmt_start'],
+                stmt_end=dates['stmt_end'],
+                stmt_auto_end=dates['stmt_auto_end']
+            )  # ← this closing parenthesis was missing
 
             gui.progress.stop()
             if isinstance(output_path, str) and output_path.startswith("⚠"):
@@ -168,8 +177,7 @@ def run_reconciliation_gui(gui: JustEatReconciliationGUI, start_date: str, end_d
             print(tb)
             messagebox.showerror(
                 "Error During Reconciliation",
-                "An unexpected error occurred while running reconciliation.\n\n"
-                "Please verify your inputs or contact support if this persists."
+                f"An unexpected error occurred while running reconciliation.\n\n{e}\n\n{tb}"
             )
 
     threading.Thread(target=task, daemon=True).start()
@@ -192,8 +200,6 @@ if __name__ == "__main__":
     app.process_pdfs_callback = lambda s, e: run_process_pdfs(app, s, e)
 
     # Step 3: Run Reconciliation
-    app.run_reconciliation_callback = lambda: run_reconciliation_gui(
-        app, app.start_date_entry.get(), app.end_date_entry.get()
-    )
+    app.run_reconciliation_callback = lambda: run_reconciliation_gui(app, app.get_all_dates())
 
     app.mainloop()
