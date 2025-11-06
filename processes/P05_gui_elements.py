@@ -1,39 +1,84 @@
 # ====================================================================================================
 # P05_gui_elements.py
 # ----------------------------------------------------------------------------------------------------
-# Full GUI for Just Eat Orders-to-Cash Reconciliation
-# ----------------------------------------------------------------------------------------------------
+# Full Tkinter GUI for the Just Eat Orders-to-Cash Reconciliation workflow.
+#
+# Purpose:
+#   - Provide a single, user-friendly interface to run the 3-step reconciliation process:
+#       Step 1 → Combine DWH Data
+#       Step 2 → Process PDFs for the selected statement period
+#       Step 3 → Run reconciliation between JE statements and DWH data
+#
 # Features:
-# - Defaults accounting period to previous month
-# - On startup → scans JE folder for latest Order Level Detail and sets statement period
-# - When accounting dates change → rescans and updates statement period automatically
-# - Includes all 3 steps (DWH / PDFs / Reconciliation) + status + progress bar
+#   • Automatically defaults accounting period to the previous month.
+#   • Scans existing JE Order Level Detail CSVs on startup to detect the latest statement coverage.
+#   • Auto-syncs statement period whenever accounting dates change.
+#   • Displays live status updates, progress indicators, and completion messages.
+#
+# Usage:
+#   from processes.P05_gui_elements import JustEatReconciliationGUI
+#
+# ----------------------------------------------------------------------------------------------------
+# Author:         Gerry Pidgeon
+# Created:        2025-11-05
+# Project:        Just Eat Orders-to-Cash Reconciliation
 # ====================================================================================================
 
+
+# ====================================================================================================
+# 1. SYSTEM IMPORTS
+# ----------------------------------------------------------------------------------------------------
+# Add parent directory to sys.path so this module can import other "processes" packages.
+# ====================================================================================================
 import sys
 from pathlib import Path
 
-# Allow imports from parent directory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.dont_write_bytecode = True
+sys.dont_write_bytecode = True  # Prevents __pycache__ folders from being created
 
-# Shared imports
-from processes.P00_set_packages import *  # includes datetime as dt, tkinter as tk, ttk, messagebox, etc.
-from processes.P01_set_file_paths import root_folder, provider_output_folder
 
 # ====================================================================================================
-# CLASS DEFINITION
+# 2. PROJECT IMPORTS
+# ----------------------------------------------------------------------------------------------------
+# All dependencies come from P00_set_packages.py.
+# NEVER import external packages directly in this file.
+# ====================================================================================================
+from processes.P00_set_packages import * # includes datetime as dt, tkinter as tk, ttk, messagebox, etc.
+from processes.P01_set_file_paths import root_folder, provider_output_folder
+from processes.P02_system_processes import detect_os # <-- ADDED IMPORT
+
+
+# ====================================================================================================
+# 3. MAIN GUI CLASS DEFINITION
+# ----------------------------------------------------------------------------------------------------
+# Provides the core Tkinter window and interactive workflow logic.
 # ====================================================================================================
 
 class JustEatReconciliationGUI(tk.Tk):
-    """Main Tkinter window for the Just Eat reconciliation workflow."""
+    """
+    Main GUI window for the Just Eat Orders-to-Cash Reconciliation process.
 
+    This guided interface enables users to:
+        1️⃣ Combine DWH exports into a master dataset.
+        2️⃣ Process all Just Eat statement PDFs for the chosen date range.
+        3️⃣ Run reconciliation to match DWH and JE statement data.
+
+    Attributes:
+        default_acc_start (date): Default accounting start date (1st of previous month).
+        default_acc_end (date): Default accounting end date (end of previous month).
+        combine_dwh_callback (callable | None): Linked function for Step 1.
+        process_pdfs_callback (callable | None): Linked function for Step 2.
+        run_reconciliation_callback (callable | None): Linked function for Step 3.
+    """
+
+    # ------------------------------------------------------------------------------------------------
+    # INITIALISATION
+    # ------------------------------------------------------------------------------------------------
     def __init__(self):
+        """Initialises the GUI window, default periods, and layout."""
         super().__init__()
 
-        # ----------------------------------------------------------------------------------------------------
-        # Default Accounting Period = Start and End of Previous Month
-        # ----------------------------------------------------------------------------------------------------
+        # Default accounting period = previous month (1st → last day)
         today = dt.date.today()
         first_of_this_month = today.replace(day=1)
         last_month_end = first_of_this_month - dt.timedelta(days=1)
@@ -42,33 +87,33 @@ class JustEatReconciliationGUI(tk.Tk):
         self.default_acc_start = last_month_start
         self.default_acc_end = last_month_end
 
-        # ----------------------------------------------------------------------------------------------------
-        # Window Setup
-        # ----------------------------------------------------------------------------------------------------
+        # Window configuration
         self.title("Just Eat Reconciliation Tool")
         self.geometry("720x800")
         self.resizable(False, False)
         self.configure(bg="#f4f4f4")
 
-        # External callbacks
+        # External callbacks (wired by M00_run_gui.py)
         self.combine_dwh_callback = None
         self.process_pdfs_callback = None
         self.run_reconciliation_callback = None
 
-        # Build the interface
+        # Build UI and event bindings
         self.build_ui()
-
-        # Wire change listeners
         self.wire_accounting_change_events()
 
-        # Initial sync on load
+        # Initial sync of statement period after GUI load
         self.after(100, self.sync_statement_period)
 
-    # -----------------------------------------------------------------------------------------------
-    # BUILD UI
-    # -----------------------------------------------------------------------------------------------
+
+    # ====================================================================================================
+    # 4. BUILD USER INTERFACE
+    # ----------------------------------------------------------------------------------------------------
+    # Creates all visible UI components: headers, date pickers, buttons, progress indicators.
+    # ====================================================================================================
     def build_ui(self):
-        # --- Header
+        """Builds and lays out all GUI widgets, including headers, date selectors, and buttons."""
+        # --- Header ---
         tk.Label(
             self, text="🍴 Just Eat Reconciliation Tool",
             font=("Segoe UI", 16, "bold"), bg="#f4f4f4", fg="#FF6600"
@@ -79,7 +124,7 @@ class JustEatReconciliationGUI(tk.Tk):
             font=("Segoe UI", 9), bg="#f4f4f4", fg="#444"
         ).pack(pady=(0, 10))
 
-        # --- Instructions
+        # --- Instructions ---
         instr_text = (
             "How it works:\n"
             "1️⃣ Set your ACCOUNTING PERIOD (what you want in the books)\n"
@@ -97,7 +142,7 @@ class JustEatReconciliationGUI(tk.Tk):
         ).pack(fill="x")
 
         # -------------------------------------------------------------------------------------------
-        # Accounting Period
+        # ACCOUNTING PERIOD SELECTION
         # -------------------------------------------------------------------------------------------
         frame_acc = ttk.LabelFrame(self, text="Accounting Period (What goes in the books)")
         frame_acc.pack(fill="x", padx=20, pady=10)
@@ -105,13 +150,17 @@ class JustEatReconciliationGUI(tk.Tk):
         acc_frame.pack(pady=5, fill="x")
 
         ttk.Label(acc_frame, text="Accounting Start:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
-        self.acc_start_entry = DateEntry(acc_frame, width=12, background="#FF6600", foreground="white",
-                                         borderwidth=2, date_pattern="yyyy-MM-dd")
+        self.acc_start_entry = DateEntry(
+            acc_frame, width=12, background="#FF6600", foreground="white",
+            borderwidth=2, date_pattern="yyyy-MM-dd"
+        )
         self.acc_start_entry.grid(row=0, column=1, padx=5, pady=5)
 
         ttk.Label(acc_frame, text="Accounting End:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
-        self.acc_end_entry = DateEntry(acc_frame, width=12, background="#FF6600", foreground="white",
-                                       borderwidth=2, date_pattern="yyyy-MM-dd")
+        self.acc_end_entry = DateEntry(
+            acc_frame, width=12, background="#FF6600", foreground="white",
+            borderwidth=2, date_pattern="yyyy-MM-dd"
+        )
         self.acc_end_entry.grid(row=0, column=3, padx=5, pady=5)
 
         self.acc_start_entry.set_date(self.default_acc_start)
@@ -124,15 +173,18 @@ class JustEatReconciliationGUI(tk.Tk):
         ).pack(fill="x", padx=10, pady=(0, 5))
 
         # -------------------------------------------------------------------------------------------
-        # Step 1 – Combine DWH
+        # STEP 1 — Combine DWH Data
         # -------------------------------------------------------------------------------------------
         frame_dwh = ttk.LabelFrame(self, text="Step 1 – Combine DWH Data")
         frame_dwh.pack(fill="x", padx=20, pady=10)
-        ttk.Label(frame_dwh, text="Combines all monthly 'JE DWH Output.csv' files.").pack(anchor="w", padx=10, pady=5)
+        ttk.Label(
+            frame_dwh,
+            text="Combines all monthly 'JE DWH Output.csv' files."
+        ).pack(anchor="w", padx=10, pady=5)
         ttk.Button(frame_dwh, text="Combine DWH Data", command=self.combine_dwh).pack(pady=(0, 5))
 
         # -------------------------------------------------------------------------------------------
-        # Step 2 – Process PDFs
+        # STEP 2 — Process PDFs
         # -------------------------------------------------------------------------------------------
         frame_pdf = ttk.LabelFrame(self, text="Step 2 – Process PDFs (Statement Period)")
         frame_pdf.pack(fill="x", padx=20, pady=10)
@@ -140,13 +192,17 @@ class JustEatReconciliationGUI(tk.Tk):
         date_frame.pack(pady=5)
 
         ttk.Label(date_frame, text="Statement Start:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
-        self.start_date_entry = DateEntry(date_frame, width=12, background="#FF6600", foreground="white",
-                                          borderwidth=2, date_pattern="yyyy-MM-dd")
+        self.start_date_entry = DateEntry(
+            date_frame, width=12, background="#FF6600", foreground="white",
+            borderwidth=2, date_pattern="yyyy-MM-dd"
+        )
         self.start_date_entry.grid(row=0, column=1, padx=5, pady=5)
 
         ttk.Label(date_frame, text="Statement End:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
-        self.end_date_entry = DateEntry(date_frame, width=12, background="#FF6600", foreground="white",
-                                        borderwidth=2, date_pattern="yyyy-MM-dd")
+        self.end_date_entry = DateEntry(
+            date_frame, width=12, background="#FF6600", foreground="white",
+            borderwidth=2, date_pattern="yyyy-MM-dd"
+        )
         self.end_date_entry.grid(row=0, column=3, padx=5, pady=5)
 
         self.statement_end_label = tk.Label(
@@ -155,11 +211,13 @@ class JustEatReconciliationGUI(tk.Tk):
         )
         self.statement_end_label.pack(fill="x", padx=10, pady=(0, 5))
 
-        ttk.Button(frame_pdf, text="Process PDFs for Statement Period",
-                   command=self.process_pdfs).pack(pady=(5, 5))
+        ttk.Button(
+            frame_pdf, text="Process PDFs for Statement Period",
+            command=self.process_pdfs
+        ).pack(pady=(5, 5))
 
         # -------------------------------------------------------------------------------------------
-        # Step 3 – Run Reconciliation
+        # STEP 3 — Run Reconciliation
         # -------------------------------------------------------------------------------------------
         frame_recon = ttk.LabelFrame(self, text="Step 3 – Run Reconciliation")
         frame_recon.pack(fill="x", padx=20, pady=10)
@@ -167,11 +225,10 @@ class JustEatReconciliationGUI(tk.Tk):
             frame_recon,
             text="Matches DWH data with JE statements. JE covers full weeks; DWH accrues remainder."
         ).pack(anchor="w", padx=10, pady=5)
-        ttk.Button(frame_recon, text="Run Reconciliation",
-                   command=self.run_reconciliation).pack(pady=(5, 8))
+        ttk.Button(frame_recon, text="Run Reconciliation", command=self.run_reconciliation).pack(pady=(5, 8))
 
         # -------------------------------------------------------------------------------------------
-        # Status + Progress
+        # STATUS + PROGRESS BAR
         # -------------------------------------------------------------------------------------------
         ttk.Separator(self).pack(fill="x", pady=(10, 5))
         self.status_label = ttk.Label(self, text="Status: Waiting for user input...", anchor="w")
@@ -180,20 +237,26 @@ class JustEatReconciliationGUI(tk.Tk):
         self.progress.pack(fill="x", padx=20, pady=(5, 15))
         ttk.Button(self, text="Open Output Folder", command=self.open_output_folder).pack(pady=(0, 15))
 
-    # -----------------------------------------------------------------------------------------------
-    # ACCOUNTING → STATEMENT AUTO-SYNC
-    # -----------------------------------------------------------------------------------------------
+
+    # ====================================================================================================
+    # 5. ACCOUNTING ↔ STATEMENT AUTO-SYNC
+    # ----------------------------------------------------------------------------------------------------
+    # Keeps statement period aligned automatically with accounting date selection.
+    # ====================================================================================================
+
     def wire_accounting_change_events(self):
+        """Attach bindings to trigger re-sync when accounting dates are modified."""
         for w in (self.acc_start_entry, self.acc_end_entry):
             w.bind("<<DateEntrySelected>>", self.on_accounting_changed, add="+")
             w.bind("<FocusOut>", self.on_accounting_changed, add="+")
             w.bind("<KeyRelease>", self.on_accounting_changed, add="+")
 
     def on_accounting_changed(self, *_):
+        """Triggered whenever the accounting period is updated."""
         self.sync_statement_period()
 
     def sync_statement_period(self):
-        """Run on load or accounting change: set statement period to last JE file."""
+        """Automatically detect and align the statement period based on accounting dates."""
         try:
             acc_start_str, acc_end_str = self.get_accounting_period()
             if not acc_start_str or not acc_end_str:
@@ -219,19 +282,21 @@ class JustEatReconciliationGUI(tk.Tk):
                 text=f"Detected Statement End: {stmt_auto_end.strftime('%Y-%m-%d')} (auto-calculated)"
             )
 
-            # print(f"🔄 Statement period updated → {stat_start} → {stmt_auto_end}")
-
         except Exception as e:
             print(f"⚠ Error syncing statement period: {e}")
 
-    # -----------------------------------------------------------------------------------------------
-    # HELPERS
-    # -----------------------------------------------------------------------------------------------
+
+    # ====================================================================================================
+    # 6. HELPER METHODS
+    # ----------------------------------------------------------------------------------------------------
+    # Utility functions for date conversion, detection, and input retrieval.
+    # ====================================================================================================
     def to_monday(self, d):
+        """Return the Monday of the given date's week."""
         return d - dt.timedelta(days=d.weekday())
 
     def detect_statement_coverage(self):
-        """Return earliest and latest Monday coverage from JE Order Level Detail filenames."""
+        """Detect earliest and latest JE Order Level Detail CSV statement coverage."""
         try:
             pat = re.compile(
                 r"(?P<sYY>\d{2})\.(?P<sMM>\d{2})\.(?P<sDD>\d{2})\s*-\s*"
@@ -254,16 +319,23 @@ class JustEatReconciliationGUI(tk.Tk):
             print(f"⚠ Error detecting statement coverage: {e}")
             return None, None
 
-    # -----------------------------------------------------------------------------------------------
-    # BUTTON ACTIONS
-    # -----------------------------------------------------------------------------------------------
+
+    # ====================================================================================================
+    # 7. BUTTON ACTIONS
+    # ----------------------------------------------------------------------------------------------------
+    # Triggered when GUI buttons are pressed (linked via M00_run_gui.py callbacks).
+    # ====================================================================================================
+
     def get_accounting_period(self):
+        """Return a tuple (start, end) for the selected accounting period."""
         return self.acc_start_entry.get(), self.acc_end_entry.get()
 
     def get_statement_period(self):
+        """Return a tuple (start, end) for the selected statement period."""
         return self.start_date_entry.get(), self.end_date_entry.get()
 
     def get_all_dates(self):
+        """Return all relevant date values as a dictionary."""
         acc_start, acc_end = self.get_accounting_period()
         stmt_start, stmt_end = self.get_statement_period()
         m = re.search(r"(\d{4}-\d{2}-\d{2})", self.statement_end_label.cget("text"))
@@ -277,12 +349,14 @@ class JustEatReconciliationGUI(tk.Tk):
         }
 
     def combine_dwh(self):
+        """Trigger Step 1 – Combine DWH Data."""
         if self.combine_dwh_callback:
             self.combine_dwh_callback()
         else:
             messagebox.showinfo("Info", "No function linked for Combine DWH button yet.")
 
     def process_pdfs(self):
+        """Trigger Step 2 – Process PDFs."""
         if self.process_pdfs_callback:
             s, e = self.start_date_entry.get(), self.end_date_entry.get()
             self.process_pdfs_callback(s, e)
@@ -290,6 +364,7 @@ class JustEatReconciliationGUI(tk.Tk):
             messagebox.showinfo("Info", "No function linked for Process PDFs button yet.")
 
     def run_reconciliation(self):
+        """Trigger Step 3 – Run Reconciliation."""
         if not self.run_reconciliation_callback:
             messagebox.showinfo("Info", "No function linked for Run Reconciliation button yet.")
             return
@@ -302,5 +377,26 @@ class JustEatReconciliationGUI(tk.Tk):
         except TypeError:
             self.run_reconciliation_callback()
 
+    # --- MODIFIED SECTION ---
+
+    def open_folder_in_explorer(self, path_to_open: Path):
+        """Cross-platform function to open a folder in the native file explorer."""
+        try:
+            os_type = detect_os()
+            # Use os.startfile on Windows
+            if os_type == "Windows":
+                os.startfile(path_to_open)
+            # Use 'open' command on macOS
+            elif os_type == "macOS":
+                subprocess.run(["open", path_to_open], check=True)
+            # Use 'xdg-open' on Linux/WSL
+            elif os_type in ["Linux", "Windows (WSL)"]:
+                subprocess.run(["xdg-open", path_to_open], check=True)
+            else:
+                messagebox.showerror("Error", f"Unsupported OS: {os_type}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder:\n{e}")
+
     def open_output_folder(self):
-        messagebox.showinfo("Info", f"This will open:\n{provider_output_folder}")
+        """Opens the provider output folder in the native file explorer."""
+        self.open_folder_in_explorer(provider_output_folder)

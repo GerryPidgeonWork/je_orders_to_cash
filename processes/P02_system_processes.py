@@ -1,102 +1,142 @@
 # ====================================================================================================
 # P02_system_processes.py
+# ----------------------------------------------------------------------------------------------------
+# Provides environment detection and user folder resolution utilities.
+#
+# Purpose:
+#   - Detect the user's operating environment (Windows, macOS, WSL, Linux, or iOS).
+#   - Dynamically determine the correct default Downloads folder for file operations.
+#   - Support cross-platform compatibility (Windows native, WSL, Mac, Linux).
+#
+# Usage:
+#   from processes.P02_system_processes import detect_os, user_download_folder
+#
+# Example:
+#   >>> detect_os()
+#   'Windows (WSL)'
+#   >>> user_download_folder()
+#   WindowsPath('C:/Users/username/Downloads')
+#
+# ----------------------------------------------------------------------------------------------------
+# Author:        Gerry Pidgeon
+# Created:       2025-11-05
+# Project:       Just Eat Orders-to-Cash Reconciliation
 # ====================================================================================================
 
-# ====================================================================================================
-# Import Libraries that are required to adjust sys path
-# ====================================================================================================
-import sys                      # Provides access to system-specific parameters and functions
-from pathlib import Path        # Offers an object-oriented interface for filesystem paths
 
-# Adjust sys.path so we can import modules from the parent folder
+# ====================================================================================================
+# 1. SYSTEM IMPORTS
+# ----------------------------------------------------------------------------------------------------
+# Add parent directory to sys.path so this module can import other "processes" packages.
+# ====================================================================================================
+import sys
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.dont_write_bytecode = True  # Prevents _pycache_ creation
+sys.dont_write_bytecode = True  # Prevents __pycache__ folders from being created
 
-# Import Project Libraries
+
+# ====================================================================================================
+# 2. PROJECT IMPORTS
+# ----------------------------------------------------------------------------------------------------
+# Bring in standard libraries and settings from the central import hub.
+# ====================================================================================================
 from processes.P00_set_packages import *
 
-# ====================================================================================================
-# Import shared functions and file paths from other folders
-# ====================================================================================================
-
-
 
 # ====================================================================================================
-# Functions to detect Operating System
+# 3. OPERATING SYSTEM DETECTION
+# ----------------------------------------------------------------------------------------------------
+# Identify which OS or subsystem Python is currently running on.
+# Supports Windows, macOS, Linux, WSL, and iOS.
 # ====================================================================================================
 
 def detect_os() -> str:
     """
-    Detect the current operating environment.
+    Detect the current operating system or environment.
 
     Returns:
-        - "Windows"           : Running under native Windows Python.
-        - "Windows (WSL)"     : Running under WSL (Linux kernel with Microsoft signature).
-        - "Linux"             : Running under a non-WSL Linux.
-        - "iOS"               : Running under Python on iOS (e.g. Pythonista, Pyto).
+        str:
+            One of the following labels:
+            - "Windows"           : Running under native Windows Python.
+            - "Windows (WSL)"     : Running under Windows Subsystem for Linux.
+            - "macOS"             : Running under macOS (Darwin kernel).
+            - "Linux"             : Running under standalone Linux.
+            - "iOS"               : Running under Python on iOS (Pythonista, Pyto, etc.).
+            - Otherwise, returns sys.platform for unknown systems.
     """
-    # 1) Native Windows
+    # --- 1) Native Windows ---
     if sys.platform == "win32":
         return "Windows"
 
-    # 2) Darwin-based (macOS or iOS)
+    # --- 2) macOS or iOS (Darwin kernel) ---
     if sys.platform == "darwin":
+        import platform
         machine = platform.machine() or ""
-        # iOS devices often report machine names beginning with "iP" (iPhone/iPad)
+        # iOS devices often report names beginning with "iP" (iPhone, iPad)
         if machine.startswith(("iP",)):
             return "iOS"
-        # Fallback: treat any other Darwin as macOS (or generic Darwin)
         return "macOS"
 
-    # 3) Linux or WSL
+    # --- 3) Linux and WSL ---
     if sys.platform.startswith("linux"):
+        import platform
         release = platform.uname().release.lower()
-        # WSL-identifiers in the Linux kernel release string
+        # WSL identifiers appear in kernel release strings
         if "microsoft" in release or "wsl" in release:
             return "Windows (WSL)"
         return "Linux"
 
-    # 4) Anything else
+    # --- 4) Fallback for unrecognised systems ---
     return sys.platform
 
+
 # ====================================================================================================
-# Functions to derive User's Download Folder
+# 4. USER DOWNLOAD FOLDER DETECTION
+# ----------------------------------------------------------------------------------------------------
+# Determines the correct "Downloads" folder depending on OS type.
 # ====================================================================================================
 
 def user_download_folder() -> Path:
     """
-    Return the current user's Downloads folder based on the OS.
+    Return the current user's Downloads folder path depending on the OS.
+
+    Returns:
+        Path: A `pathlib.Path` object pointing to the user's Downloads directory.
     """
     os_type = detect_os()
 
+    # --- Windows native ---
     if os_type == "Windows":
-        # Windows user profile Downloads
         return Path(f"C:/Users/{getpass.getuser()}/Downloads")
 
+    # --- Windows Subsystem for Linux (WSL) ---
     elif os_type == "Windows (WSL)":
-        # WSL has no real Downloads folder, so fallback to Linux home
         return Path.home() / "Downloads"
 
+    # --- macOS ---
     elif os_type == "macOS":
-        # macOS standard Downloads folder
         return Path.home() / "Downloads"
 
+    # --- Linux ---
     elif os_type == "Linux":
-        # Generic Linux, use home Downloads
         return Path.home() / "Downloads"
 
+    # --- iOS ---
     elif os_type == "iOS":
-        # iOS doesn’t have a standard Downloads folder
+        # iOS doesn't expose a real "Downloads" directory
         return Path.home()
 
+    # --- Fallback (safe default) ---
     else:
-        # Fallback
         return Path.home()
 
-# ====================================================================================================
-# Run Main Script
-# ====================================================================================================
 
+# ====================================================================================================
+# 5. MAIN EXECUTION (STANDALONE TEST)
+# ----------------------------------------------------------------------------------------------------
+# Allows the module to be run directly to verify OS detection.
+# ====================================================================================================
 if __name__ == "__main__":
     print(f"Detected OS: {detect_os()}")
     print(f"Download folder: {user_download_folder()}")
